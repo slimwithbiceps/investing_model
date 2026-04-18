@@ -2,92 +2,102 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
-import plotly.express as px
 
-# --- SETTINGS & BENCHMARKS (APRIL 2026) ---
-st.set_page_config(page_title="EMI-Shield Pro", layout="wide")
-NIFTY_PE = 21.4
-NIFTY_MOMENTUM = 0.021  # 2.1% 1-year return
-NIFTY_VOL = 0.18        # 18% Annualized volatility
+# --- CONFIG ---
+st.set_page_config(page_title="EMI-Shield Cockpit", layout="wide")
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?output=csv" # Publish to Web > CSV
 
-# REPLACE with your Google Sheet CSV Link (File > Share > Publish to Web > CSV)
-SHEET_URL = "YOUR_LINK_HERE"
-
-def get_detailed_rankings(tickers):
+def get_market_data(tickers):
     data = yf.download(tickers, period="1y", interval="1wk")['Close']
-    returns = (data.iloc[-1] / data.iloc[-52]) - 1
+    # Benchmarks
+    returns = (data.iloc[-1] / data.iloc[-26]) - 1 # 6-month
     vol = data.pct_change().std() * np.sqrt(52)
+    efficiency = returns / vol
     
     results = []
     for t in tickers:
         try:
             info = yf.Ticker(t).info
-            pe = info.get('trailingPE', 0)
-            
-            # SCORING LOGIC
-            score = (returns[t] / vol[t])
-            
-            # REASONING & VERDICT
-            if returns[t] > NIFTY_MOMENTUM and pe < NIFTY_PE * 1.5 and vol[t] < 0.30:
-                verdict = "💎 STRONG ACCUMULATE"
-                reason = "Beating Nifty Momentum with reasonable valuation."
-            elif returns[t] > 0 and pe < NIFTY_PE * 2:
-                verdict = "✋ HOLD"
-                reason = "Trend is positive but valuation is getting rich."
-            else:
-                verdict = "⚠️ TRIM / AVOID"
-                reason = "Underperforming benchmark or extreme volatility."
-            
+            pe = info.get('trailingPE', 50)
             results.append({
-                'Ticker': t,
-                'Verdict': verdict,
-                'Momentum vs Nifty': f"{((returns[t] - NIFTY_MOMENTUM)*100):.1f}%",
-                'P/E Ratio': round(pe, 1),
-                'Efficiency (Risk-Adj)': round(score, 2),
-                'Instruction': reason
+                "Ticker": t,
+                "Momentum": min(max(returns[t] * 2, 0), 1.0), # Normalized for bar
+                "Efficiency": min(max(efficiency[t] / 2, 0), 1.0), # Normalized for bar
+                "Valuation": pe,
+                "CurrentPrice": data[t].iloc[-1]
             })
         except: continue
-    
-    return pd.DataFrame(results).sort_values('Efficiency (Risk-Adj)', ascending=False).reset_index(drop=True)
+    return pd.DataFrame(results)
 
-# --- UI LAYOUT ---
-st.title("🛰️ EMI-Shield: Pro Command Center")
+# --- THE COCKPIT ---
+st.title("🛰️ EMI-Shield: Command Center")
 
-# 1. MARKET BENCHMARKS
-st.subheader("📊 Market Context (Nifty 50 Benchmarks)")
-m1, m2, m3 = st.columns(3)
-m1.metric("Nifty P/E", NIFTY_PE, "Target: < 22")
-m2.metric("Nifty 1Y Return", f"{NIFTY_MOMENTUM*100}%", "Market is flat/choppy")
-m3.metric("Nifty Volatility", f"{NIFTY_VOL*100}%", "Risk Floor")
-
-# 2. SIP HISTORY (From Google Sheets)
-st.divider()
-st.subheader("📈 Your SIP History & Allocation")
+# Load Portfolio Memory
 try:
-    df_history = pd.read_csv(SHEET_URL)
-    # Grouping by Ticker to show total invested
-    sip_summary = df_history.groupby('Ticker')['Total_Value'].sum().reset_index()
-    fig = px.bar(sip_summary, x='Ticker', y='Total_Value', title="Cumulative Investment per Stock")
-    st.plotly_chart(fig, use_container_width=True)
+    my_stocks = pd.read_csv(SHEET_URL)
+    portfolio_tickers = my_stocks['Ticker'].unique().tolist()
 except:
-    st.info("💡 Connect your Google Sheet to see your SIP History chart here.")
+    my_stocks = pd.DataFrame()
+    portfolio_tickers = []
 
-# 3. ANALYSIS & INSTRUCTIONS
+# Universe for new buys
+universe = ["HAL.NS", "BEL.NS", "TRENT.NS", "ZOMATO.NS", "RELIANCE.NS", "TCS.NS", "ITC.NS", "BHARTIARTL.NS", "TATAMOTORS.NS", "COALINDIA.NS"]
+all_data = get_market_data(list(set(universe + portfolio_tickers)))
+
+# --- SECTION 1: NEW CAPITAL (THE ₹45K SIP) ---
+st.header("1️⃣ New Capital Deployment (₹45,000)")
+st.subheader("Target: Top 3 Stocks (₹15,000 each)")
+
+top_10 = all_data[all_data['Ticker'].isin(universe)].sort_values("Efficiency", ascending=False).head(10).reset_index(drop=True)
+
+st.dataframe(
+    top_10,
+    column_config={
+        "Momentum": st.column_config.ProgressColumn("Speed vs Nifty", format=" ", min_value=0, max_value=1),
+        "Efficiency": st.column_config.ProgressColumn("Ride Smoothness", format=" ", min_value=0, max_value=1),
+        "Valuation": st.column_config.NumberColumn("Price Tag (P/E)", format="%d", help="Red is Expensive"),
+    },
+    hide_index=True,
+    use_container_width=True
+)
+
+# --- SECTION 2: PORTFOLIO MONITOR ---
 st.divider()
-st.subheader("🎯 This Fortnight's Strategy Analysis")
+st.header("2️⃣ Existing Holdings Tracker")
 
-if st.button("Run Deep Scan"):
-    universe = ["HAL.NS", "BEL.NS", "TRENT.NS", "ZOMATO.NS", "RELIANCE.NS", "TCS.NS", "ITC.NS", "BHARTIARTL.NS"]
-    analysis = get_detailed_rankings(universe)
+if not my_stocks.empty:
+    # Merge holdings with live data
+    monitor = my_stocks.merge(all_data, on="Ticker")
+    monitor['Returns'] = ((monitor['CurrentPrice'] - monitor['BuyPrice']) / monitor['BuyPrice']) * 100
     
-    # EXACT INSTRUCTIONS BOX
-    st.warning("⚡ EXACT ACTIONS FOR YOUR ₹45,000:")
-    top_buys = analysis[analysis['Verdict'] == "💎 STRONG ACCUMULATE"].head(3)
+    def get_action(row):
+        if row['Efficiency'] < 0.2 or row['Valuation'] > 70: return "🛑 SELL"
+        return "💎 HOLD"
+
+    monitor['Action'] = monitor.apply(get_action, axis=1)
     
-    if not top_buys.empty:
-        for idx, row in top_buys.iterrows():
-            st.write(f"- **Invest ₹15,000 into {row['Ticker']}**: {row['Instruction']}")
+    # Display Table
+    st.dataframe(
+        monitor[['Ticker', 'Returns', 'Action', 'Efficiency', 'Valuation']],
+        column_config={
+            "Returns": st.column_config.NumberColumn("Total Return %", format="%.1f%%"),
+            "Action": st.column_config.TextColumn("Verdict"),
+            "Efficiency": st.column_config.ProgressColumn("Current Health", min_value=0, max_value=1),
+        },
+        use_container_width=True
+    )
+    
+    # --- SECTION 3: THE RECYCLE PLAN ---
+    st.divider()
+    st.header("3️⃣ Cash Recycling Instructions")
+    to_sell = monitor[monitor['Action'] == "🛑 SELL"]
+    
+    if not to_sell.empty:
+        total_sell_value = (to_sell['Qty'] * to_sell['CurrentPrice']).sum()
+        st.warning(f"⚠️ Action Required: Sell indicated stocks to free up ₹{total_sell_value:,.0f}")
+        st.info(f"👉 **Re-invest that ₹{total_sell_value:,.0f}** equally into the Top 3 stocks from the 'New Capital' list above.")
     else:
-        st.write("- **Hold Cash**: No stocks currently meet the 'Strong Accumulate' benchmark. Park ₹45k in a Liquid Fund.")
+        st.success("✅ No recycling needed today. Your existing holdings are healthy.")
 
-    st.table(analysis)
+else:
+    st.info("Your portfolio is currently empty. Run your first ₹45k SIP using Section 1.")
