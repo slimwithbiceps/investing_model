@@ -2,102 +2,116 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
+import plotly.express as px
+from datetime import datetime
 
-# --- CONFIG ---
-st.set_page_config(page_title="EMI-Shield Cockpit", layout="wide")
-SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?output=csv" # Publish to Web > CSV
+# --- SETTINGS ---
+st.set_page_config(page_title="EMI-Shield Pro 2026", layout="wide")
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?output=csv" # Share > Publish to Web > CSV
 
-def get_market_data(tickers):
+# APRIL 2026 MARKET BENCHMARKS
+NIFTY_PE_BENCH = 21.4
+NIFTY_200_DMA = 25170
+
+def get_market_health():
+    nifty = yf.download("^NSEI", period="1y", interval="1d")
+    current_price = nifty['Close'].iloc[-1]
+    dma_200 = nifty['Close'].rolling(window=200).mean().iloc[-1]
+    daily_chg = nifty['Close'].pct_change().iloc[-1]
+    weekly_chg = (nifty['Close'].iloc[-1] / nifty['Close'].iloc[-5]) - 1
+    status = "🟢 BULLISH" if current_price > dma_200 else "🔴 CAUTION (Market Below 200-DMA)"
+    return status, daily_chg, weekly_chg, current_price
+
+def get_stock_analysis(tickers):
     data = yf.download(tickers, period="1y", interval="1wk")['Close']
-    # Benchmarks
-    returns = (data.iloc[-1] / data.iloc[-26]) - 1 # 6-month
+    returns_6m = (data.iloc[-1] / data.iloc[-26]) - 1
     vol = data.pct_change().std() * np.sqrt(52)
-    efficiency = returns / vol
+    daily_data = yf.download(tickers, period="5d", interval="1d")['Close']
+    daily_chg = daily_data.pct_change().iloc[-1]
     
     results = []
     for t in tickers:
         try:
             info = yf.Ticker(t).info
-            pe = info.get('trailingPE', 50)
+            pe = info.get('trailingPE', 0)
+            score = returns_6m[t] / vol[t]
+            
+            # REASONING LOGIC
+            if score > 1.0 and pe < 45: verdict, rec = "💎 ELITE", "High efficiency, fair price."
+            elif score > 0.5: verdict, rec = "✅ STABLE", "Healthy momentum."
+            elif pe > 60: verdict, rec = "⚠️ BUBBLE", "Valuation disconnected from trend."
+            else: verdict, rec = "🛑 WEAK", "Underperforming volatility risk."
+
             results.append({
-                "Ticker": t,
-                "Momentum": min(max(returns[t] * 2, 0), 1.0), # Normalized for bar
-                "Efficiency": min(max(efficiency[t] / 2, 0), 1.0), # Normalized for bar
-                "Valuation": pe,
-                "CurrentPrice": data[t].iloc[-1]
+                "Ticker": t, "Verdict": verdict, "Daily %": daily_chg[t],
+                "Momentum (6M)": returns_6m[t], "Efficiency": score,
+                "PE": pe, "Detailed Instruction": rec
             })
         except: continue
-    return pd.DataFrame(results)
+    return pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
 
-# --- THE COCKPIT ---
-st.title("🛰️ EMI-Shield: Command Center")
+# --- UI LAYOUT ---
+st.title("🛰️ EMI-Shield: Executive Dashboard")
 
-# Load Portfolio Memory
+# 1. MARKET HEALTH & REASONING
+health, d_chg, w_chg, n_price = get_market_health()
+st.subheader("🌍 Market Health Overview")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Market Status", health)
+c2.metric("Nifty 50 Price", f"{n_price:,.0f}")
+c3.metric("Daily Change", f"{d_chg*100:.2f}%")
+c4.metric("Weekly Change", f"{w_chg*100:.2f}%")
+
+with st.expander("📖 Metric Guide (How we decide)"):
+    st.write("**Efficiency:** Measures 'Smoothness'. 0.0 to 2.0. We want > 0.8 for EMI safety.")
+    st.write("**Momentum (6M):** Must be > Nifty's 6M growth to justify direct trading.")
+    st.write("**Verdict:** 'Elite' stocks are your primary targets for the ₹45k SIP.")
+
+# 2. SIP HISTORY (From Google Sheets)
+st.divider()
+st.subheader("📈 Portfolio History & Memory")
 try:
     my_stocks = pd.read_csv(SHEET_URL)
-    portfolio_tickers = my_stocks['Ticker'].unique().tolist()
+    fig = px.pie(my_stocks, values='Total_Value', names='Ticker', hole=0.4, title="Current Capital Allocation")
+    st.plotly_chart(fig, use_container_width=True)
 except:
-    my_stocks = pd.DataFrame()
-    portfolio_tickers = []
+    st.info("Log your trades in Google Sheets to see your live allocation pie chart here.")
 
-# Universe for new buys
-universe = ["HAL.NS", "BEL.NS", "TRENT.NS", "ZOMATO.NS", "RELIANCE.NS", "TCS.NS", "ITC.NS", "BHARTIARTL.NS", "TATAMOTORS.NS", "COALINDIA.NS"]
-all_data = get_market_data(list(set(universe + portfolio_tickers)))
+# 3. THE COMMANDS (The 3-Step Action Plan)
+st.divider()
+st.header("🎯 This Fortnight's Mission Plan")
 
-# --- SECTION 1: NEW CAPITAL (THE ₹45K SIP) ---
-st.header("1️⃣ New Capital Deployment (₹45,000)")
-st.subheader("Target: Top 3 Stocks (₹15,000 each)")
+universe = ["HAL.NS", "TRENT.NS", "BEL.NS", "ZOMATO.NS", "RELIANCE.NS", "TCS.NS", "BHARTIARTL.NS", "COALINDIA.NS", "NTPC.NS", "TATAMOTORS.NS"]
+analysis = get_stock_analysis(universe)
 
-top_10 = all_data[all_data['Ticker'].isin(universe)].sort_values("Efficiency", ascending=False).head(10).reset_index(drop=True)
+# ACTION 1: NEW CAPITAL
+with st.container():
+    st.subheader("Step 1: Deploy New ₹45,000")
+    top_3 = analysis[analysis['Verdict'].isin(["💎 ELITE", "✅ STABLE"])].head(3)
+    if not top_3.empty:
+        for i, row in top_3.iterrows():
+            st.success(f"**Invest ₹15,000 in {row['Ticker']}** ({row['Detailed Instruction']})")
+    else:
+        st.error("Market is overheated. Hold your ₹45k in a Liquid Fund this fortnight.")
 
+# ACTION 2: PORTFOLIO AUDIT
+st.subheader("Step 2: Existing Holdings Audit")
 st.dataframe(
-    top_10,
+    analysis,
     column_config={
-        "Momentum": st.column_config.ProgressColumn("Speed vs Nifty", format=" ", min_value=0, max_value=1),
-        "Efficiency": st.column_config.ProgressColumn("Ride Smoothness", format=" ", min_value=0, max_value=1),
-        "Valuation": st.column_config.NumberColumn("Price Tag (P/E)", format="%d", help="Red is Expensive"),
+        "Daily %": st.column_config.NumberColumn(format="%.2f%%"),
+        "Momentum (6M)": st.column_config.ProgressColumn(min_value=0, max_value=1),
+        "Efficiency": st.column_config.ProgressColumn(min_value=0, max_value=2),
+        "PE": st.column_config.NumberColumn("P/E Ratio", help=f"Nifty Bench: {NIFTY_PE_BENCH}")
     },
-    hide_index=True,
     use_container_width=True
 )
 
-# --- SECTION 2: PORTFOLIO MONITOR ---
-st.divider()
-st.header("2️⃣ Existing Holdings Tracker")
-
-if not my_stocks.empty:
-    # Merge holdings with live data
-    monitor = my_stocks.merge(all_data, on="Ticker")
-    monitor['Returns'] = ((monitor['CurrentPrice'] - monitor['BuyPrice']) / monitor['BuyPrice']) * 100
-    
-    def get_action(row):
-        if row['Efficiency'] < 0.2 or row['Valuation'] > 70: return "🛑 SELL"
-        return "💎 HOLD"
-
-    monitor['Action'] = monitor.apply(get_action, axis=1)
-    
-    # Display Table
-    st.dataframe(
-        monitor[['Ticker', 'Returns', 'Action', 'Efficiency', 'Valuation']],
-        column_config={
-            "Returns": st.column_config.NumberColumn("Total Return %", format="%.1f%%"),
-            "Action": st.column_config.TextColumn("Verdict"),
-            "Efficiency": st.column_config.ProgressColumn("Current Health", min_value=0, max_value=1),
-        },
-        use_container_width=True
-    )
-    
-    # --- SECTION 3: THE RECYCLE PLAN ---
-    st.divider()
-    st.header("3️⃣ Cash Recycling Instructions")
-    to_sell = monitor[monitor['Action'] == "🛑 SELL"]
-    
-    if not to_sell.empty:
-        total_sell_value = (to_sell['Qty'] * to_sell['CurrentPrice']).sum()
-        st.warning(f"⚠️ Action Required: Sell indicated stocks to free up ₹{total_sell_value:,.0f}")
-        st.info(f"👉 **Re-invest that ₹{total_sell_value:,.0f}** equally into the Top 3 stocks from the 'New Capital' list above.")
-    else:
-        st.success("✅ No recycling needed today. Your existing holdings are healthy.")
-
+# ACTION 3: RECYCLE
+st.subheader("Step 3: Sell & Recycle Instructions")
+sells = analysis[analysis['Verdict'] == "🛑 WEAK"]
+if not sells.empty:
+    st.warning(f"Sell recommendations found for: {', '.join(sells['Ticker'].tolist())}")
+    st.write("Move the proceeds equally into the Top 3 stocks listed in Step 1.")
 else:
-    st.info("Your portfolio is currently empty. Run your first ₹45k SIP using Section 1.")
+    st.success("Your current holdings are outperforming. No 'Sell' actions required.")
