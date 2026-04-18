@@ -9,36 +9,40 @@ from datetime import datetime
 st.set_page_config(page_title="EMI-Shield Pro 2026", layout="wide")
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?output=csv" # Share > Publish to Web > CSV
 
-# APRIL 2026 MARKET BENCHMARKS
-NIFTY_PE_BENCH = 21.4
-NIFTY_200_DMA = 25170
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import numpy as np
+import plotly.express as px
+
+# --- CONFIG & BENCHMARKS ---
+st.set_page_config(page_title="EMI-Shield Pro", layout="wide")
+NIFTY_PE_BENCH = 21.38 # April 2026 Median
+SHEET_URL = "YOUR_GOOGLE_SHEET_CSV_LINK" 
+
+# EXTENDED 50-STOCK UNIVERSE
+UNIVERSE_50 = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "BHARTIARTL.NS", "SBI.NS", "LICI.NS", 
+    "ITC.NS", "HUL.NS", "LTIM.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "ADANIENT.NS", "ADANIPORTS.NS", 
+    "KOTAKBANK.NS", "TITAN.NS", "AXISBANK.NS", "ASIANPAINT.NS", "ULTRACEMCO.NS", "NTPC.NS", "TATAMOTORS.NS", 
+    "M&M.NS", "ONGC.NS", "POWERGRID.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "COALINDIA.NS", "ADANIPOWER.NS", 
+    "TRENT.NS", "HAL.NS", "BEL.NS", "ZOMATO.NS", "VBL.NS", "DLF.NS", "SIEMENS.NS", "GRASIM.NS", "HINDALCO.NS", 
+    "NESTLEIND.NS", "SBILIFE.NS", "BAJAJ-AUTO.NS", "WIPRO.NS", "TECHM.NS", "EICHERMOT.NS", "INDUSINDBK.NS", 
+    "DIVISLAB.NS", "BPCL.NS", "CIPLA.NS", "HCLTECH.NS"
+]
 
 def get_market_health():
-    # Fetching data
-    nifty = yf.download("^NSEI", period="1y", interval="1d")
-    
-    # We use .iloc[-1] and force it to a float to avoid the "Series Ambiguity" error
-    # We also use .squeeze() to flatten the data if yfinance returns a MultiIndex
-    close_prices = nifty['Close'].squeeze() 
-    
-    current_price = float(close_prices.iloc[-1])
-    dma_200 = float(close_prices.rolling(window=200).mean().iloc[-1])
-    
-    daily_chg = float(close_prices.pct_change().iloc[-1])
-    # Weekly change (Current vs 5 days ago)
-    weekly_chg = float((close_prices.iloc[-1] / close_prices.iloc[-5]) - 1)
-    
-    # Now the comparison works because both sides are single numbers (floats)
-    status = "🟢 BULLISH" if current_price > dma_200 else "🔴 CAUTION (Market Below 200-DMA)"
-    
-    return status, daily_chg, weekly_chg, current_price
+    nifty = yf.download("^NSEI", period="1y", interval="1d")['Close'].squeeze()
+    current_price = float(nifty.iloc[-1])
+    dma_200 = float(nifty.rolling(window=200).mean().iloc[-1])
+    status = "🟢 BULLISH" if current_price > dma_200 else "🟡 CAUTION (Below 200-DMA)"
+    return status, current_price, dma_200
 
-def get_stock_analysis(tickers):
+def run_analysis(tickers):
     data = yf.download(tickers, period="1y", interval="1wk")['Close']
     returns_6m = (data.iloc[-1] / data.iloc[-26]) - 1
     vol = data.pct_change().std() * np.sqrt(52)
-    daily_data = yf.download(tickers, period="5d", interval="1d")['Close']
-    daily_chg = daily_data.pct_change().iloc[-1]
+    daily_chg = yf.download(tickers, period="2d", interval="1d")['Close'].pct_change().iloc[-1]
     
     results = []
     for t in tickers:
@@ -47,82 +51,74 @@ def get_stock_analysis(tickers):
             pe = info.get('trailingPE', 0)
             score = returns_6m[t] / vol[t]
             
-            # REASONING LOGIC
-            if score > 1.0 and pe < 45: verdict, rec = "💎 ELITE", "High efficiency, fair price."
-            elif score > 0.5: verdict, rec = "✅ STABLE", "Healthy momentum."
-            elif pe > 60: verdict, rec = "⚠️ BUBBLE", "Valuation disconnected from trend."
-            else: verdict, rec = "🛑 WEAK", "Underperforming volatility risk."
+            if score > 0.8 and pe < 50: verdict = "💎 ELITE"
+            elif score > 0.4: verdict = "✅ STABLE"
+            else: verdict = "🛑 WEAK"
 
             results.append({
-                "Ticker": t, "Verdict": verdict, "Daily %": daily_chg[t],
-                "Momentum (6M)": returns_6m[t], "Efficiency": score,
-                "PE": pe, "Detailed Instruction": rec
+                "Ticker": t.replace(".NS", ""), 
+                "Verdict": verdict,
+                "Daily %": daily_chg[t] * 100,
+                "Momentum (6M)": returns_6m[t],
+                "Efficiency": score,
+                "PE": pe
             })
         except: continue
-    return pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
+    
+    df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
+    df.index = df.index + 1 # Start serial number at 1
+    return df
 
-# --- UI LAYOUT ---
-st.title("🛰️ EMI-Shield: Executive Dashboard")
+# --- DASHBOARD UI ---
+st.title("🛡️ EMI-Shield Executive Cockpit")
 
-# 1. MARKET HEALTH & REASONING
-health, d_chg, w_chg, n_price = get_market_health()
-st.subheader("🌍 Market Health Overview")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Market Status", health)
-c2.metric("Nifty 50 Price", f"{n_price:,.0f}")
-c3.metric("Daily Change", f"{d_chg*100:.2f}%")
-c4.metric("Weekly Change", f"{w_chg*100:.2f}%")
+# STRATEGY BOX
+with st.expander("📖 VIEW DETAILED STRATEGY", expanded=True):
+    st.markdown("""
+    **Mission:** Generate **12% XIRR** to offset the **7.65% Car Loan** while managing a **₹25,000 fortnightly SIP**.
+    *   **Selection:** We filter 50 Large-Cap stocks for *Efficiency* (Return/Risk).
+    *   **Buy Rule:** Invest ₹8,333 each in the Top 3 'ELITE' stocks every fortnight.
+    *   **Recycle Rule:** Sell any holding that drops to 'WEAK' and move proceeds to the current Top 1.
+    """)
 
-with st.expander("📖 Metric Guide (How we decide)"):
-    st.write("**Efficiency:** Measures 'Smoothness'. 0.0 to 2.0. We want > 0.8 for EMI safety.")
-    st.write("**Momentum (6M):** Must be > Nifty's 6M growth to justify direct trading.")
-    st.write("**Verdict:** 'Elite' stocks are your primary targets for the ₹45k SIP.")
+# MARKET HEALTH
+status, price, dma = get_market_health()
+c1, c2, c3 = st.columns(3)
+c1.metric("Market Status", status)
+c2.metric("Nifty 50", f"{price:,.0f}")
+c3.metric("200-DMA Benchmark", f"{dma:,.0f}")
 
-# 2. SIP HISTORY (From Google Sheets)
-st.divider()
-st.subheader("📈 Portfolio History & Memory")
-try:
-    my_stocks = pd.read_csv(SHEET_URL)
-    fig = px.pie(my_stocks, values='Total_Value', names='Ticker', hole=0.4, title="Current Capital Allocation")
-    st.plotly_chart(fig, use_container_width=True)
-except:
-    st.info("Log your trades in Google Sheets to see your live allocation pie chart here.")
-
-# 3. THE COMMANDS (The 3-Step Action Plan)
-st.divider()
-st.header("🎯 This Fortnight's Mission Plan")
-
-universe = ["HAL.NS", "TRENT.NS", "BEL.NS", "ZOMATO.NS", "RELIANCE.NS", "TCS.NS", "BHARTIARTL.NS", "COALINDIA.NS", "NTPC.NS", "TATAMOTORS.NS"]
-analysis = get_stock_analysis(universe)
-
-# ACTION 1: NEW CAPITAL
-with st.container():
-    st.subheader("Step 1: Deploy New ₹45,000")
-    top_3 = analysis[analysis['Verdict'].isin(["💎 ELITE", "✅ STABLE"])].head(3)
-    if not top_3.empty:
-        for i, row in top_3.iterrows():
-            st.success(f"**Invest ₹15,000 in {row['Ticker']}** ({row['Detailed Instruction']})")
+# ANALYSIS
+if st.button("🚀 RUN FULL 50-STOCK SCAN"):
+    analysis = run_analysis(UNIVERSE_50)
+    
+    # STEP 1: NEW CAPITAL
+    st.header("1️⃣ Deployment: Fresh ₹25,000")
+    buys = analysis[analysis['Verdict'] == "💎 ELITE"].head(3)
+    if not buys.empty:
+        for i, row in buys.iterrows():
+            st.success(f"**Action:** Invest **₹8,333** in **{row['Ticker']}** (Efficiency: {row['Efficiency']:.2f})")
     else:
-        st.error("Market is overheated. Hold your ₹45k in a Liquid Fund this fortnight.")
+        st.warning("No ELITE stocks found. Consider parking ₹25k in a Liquid Fund.")
 
-# ACTION 2: PORTFOLIO AUDIT
-st.subheader("Step 2: Existing Holdings Audit")
-st.dataframe(
-    analysis,
-    column_config={
-        "Daily %": st.column_config.NumberColumn(format="%.2f%%"),
-        "Momentum (6M)": st.column_config.ProgressColumn(min_value=0, max_value=1),
-        "Efficiency": st.column_config.ProgressColumn(min_value=0, max_value=2),
-        "PE": st.column_config.NumberColumn("P/E Ratio", help=f"Nifty Bench: {NIFTY_PE_BENCH}")
-    },
-    use_container_width=True
-)
+    # STEP 2: FULL DATA TABLE
+    st.header("2️⃣ Global Market Scan (Ranked)")
+    st.dataframe(
+        analysis,
+        column_config={
+            "Daily %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Momentum (6M)": st.column_config.ProgressColumn(min_value=-0.2, max_value=1.0),
+            "Efficiency": st.column_config.ProgressColumn(min_value=0, max_value=2),
+            "PE": st.column_config.NumberColumn("P/E Ratio")
+        },
+        use_container_width=True
+    )
 
-# ACTION 3: RECYCLE
-st.subheader("Step 3: Sell & Recycle Instructions")
-sells = analysis[analysis['Verdict'] == "🛑 WEAK"]
-if not sells.empty:
-    st.warning(f"Sell recommendations found for: {', '.join(sells['Ticker'].tolist())}")
-    st.write("Move the proceeds equally into the Top 3 stocks listed in Step 1.")
-else:
-    st.success("Your current holdings are outperforming. No 'Sell' actions required.")
+# SECTION 3: SIP MEMORY (PLACEHOLDER FOR GOOGLE SHEETS)
+st.divider()
+st.subheader("📑 SIP History & P&L Tracker")
+try:
+    ledger = pd.read_csv(SHEET_URL)
+    st.write("Current Holdings and Live P&L will appear here once you connect the sheet.")
+except:
+    st.info("💡 Connect your Google Sheet CSV to see your live P&L and 'Hold/Sell' instructions.")
