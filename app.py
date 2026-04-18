@@ -2,73 +2,92 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
-from datetime import datetime
+import plotly.express as px
 
-# --- CONFIG ---
-# Replace this with your Google Sheet "Export as CSV" link
-# To get this: File > Share > Publish to Web > Link > Entire Document > CSV
-SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?output=csv" 
+# --- SETTINGS & BENCHMARKS (APRIL 2026) ---
+st.set_page_config(page_title="EMI-Shield Pro", layout="wide")
+NIFTY_PE = 21.4
+NIFTY_MOMENTUM = 0.021  # 2.1% 1-year return
+NIFTY_VOL = 0.18        # 18% Annualized volatility
 
-st.set_page_config(page_title="EMI-Shield: Command Center", layout="wide")
+# REPLACE with your Google Sheet CSV Link (File > Share > Publish to Web > CSV)
+SHEET_URL = "YOUR_LINK_HERE"
 
-def get_rankings(tickers):
-    # Fetch Data
+def get_detailed_rankings(tickers):
     data = yf.download(tickers, period="1y", interval="1wk")['Close']
+    returns = (data.iloc[-1] / data.iloc[-52]) - 1
+    vol = data.pct_change().std() * np.sqrt(52)
     
-    # Calculate Components
-    returns_26w = (data.iloc[-1] / data.iloc[-26]) - 1
-    volatility = data.pct_change().std() * np.sqrt(52)
-    ra_score = returns_26w / volatility
-    
-    # Build Table
     results = []
     for t in tickers:
         try:
             info = yf.Ticker(t).info
             pe = info.get('trailingPE', 0)
+            
+            # SCORING LOGIC
+            score = (returns[t] / vol[t])
+            
+            # REASONING & VERDICT
+            if returns[t] > NIFTY_MOMENTUM and pe < NIFTY_PE * 1.5 and vol[t] < 0.30:
+                verdict = "💎 STRONG ACCUMULATE"
+                reason = "Beating Nifty Momentum with reasonable valuation."
+            elif returns[t] > 0 and pe < NIFTY_PE * 2:
+                verdict = "✋ HOLD"
+                reason = "Trend is positive but valuation is getting rich."
+            else:
+                verdict = "⚠️ TRIM / AVOID"
+                reason = "Underperforming benchmark or extreme volatility."
+            
             results.append({
                 'Ticker': t,
-                'Momentum (26w)': f"{returns_26w[t]*100:.1f}%",
-                'Volatility': f"{volatility[t]*100:.1f}%",
-                'Efficiency Score': round(ra_score[t], 2),
-                'P/E Ratio': pe,
-                'Status': "PASS" if pe < 35 and ra_score[t] > 0.5 else "FAIL"
+                'Verdict': verdict,
+                'Momentum vs Nifty': f"{((returns[t] - NIFTY_MOMENTUM)*100):.1f}%",
+                'P/E Ratio': round(pe, 1),
+                'Efficiency (Risk-Adj)': round(score, 2),
+                'Instruction': reason
             })
         except: continue
-    return pd.DataFrame(results).sort_values('Efficiency Score', ascending=False)
-
-# --- DASHBOARD UI ---
-st.title("🛡️ EMI-Shield Command Center")
-
-# 1. ACTION LOGIC
-st.sidebar.header("Daily Mission Control")
-last_rebalance = datetime(2024, 4, 15) # This should ideally come from your Sheet
-days_passed = (datetime.now() - last_rebalance).days
-
-with st.expander("🚨 TODAY'S EXACT STEPS", expanded=True):
-    if days_passed >= 14:
-        st.error("❗ REBALANCE DUE TODAY")
-        st.write("1. Open Zerodha/Groww.")
-        st.write("2. Sell any holding marked 'FAIL' in the table below.")
-        st.write("3. Buy the Top 3 NEW 'PASS' stocks (₹15,000 each).")
-        st.write("4. Update your Google Sheet 'Trades' tab.")
-    else:
-        st.success(f"✅ HOLD POSITIONS. Next rebalance in {14 - days_passed} days.")
-        st.info("Check individual 'Status' below. If a stock you own is 'FAIL', consider an early exit.")
-
-# 2. THE QUANT MODEL
-if st.button("Run Market Scan"):
-    universe = ["HAL.NS", "BEL.NS", "TRENT.NS", "RELIANCE.NS", "ITC.NS", "ADANIPORTS.NS", "TCS.NS"]
-    ranks = get_rankings(universe)
     
-    st.subheader("📊 Market Analysis & Benchmarks")
-    st.dataframe(ranks.style.map(lambda x: 'color: green' if x == 'PASS' else 'color: red', subset=['Status']))
+    return pd.DataFrame(results).sort_values('Efficiency (Risk-Adj)', ascending=False).reset_index(drop=True)
 
-# 3. GOOGLE SHEETS INTEGRATION (VIEWER)
+# --- UI LAYOUT ---
+st.title("🛰️ EMI-Shield: Pro Command Center")
+
+# 1. MARKET BENCHMARKS
+st.subheader("📊 Market Context (Nifty 50 Benchmarks)")
+m1, m2, m3 = st.columns(3)
+m1.metric("Nifty P/E", NIFTY_PE, "Target: < 22")
+m2.metric("Nifty 1Y Return", f"{NIFTY_MOMENTUM*100}%", "Market is flat/choppy")
+m3.metric("Nifty Volatility", f"{NIFTY_VOL*100}%", "Risk Floor")
+
+# 2. SIP HISTORY (From Google Sheets)
 st.divider()
-st.subheader("📑 Your Ledger (from Google Sheets)")
+st.subheader("📈 Your SIP History & Allocation")
 try:
-    ledger = pd.read_csv(SHEET_CSV_URL)
-    st.dataframe(ledger)
+    df_history = pd.read_csv(SHEET_URL)
+    # Grouping by Ticker to show total invested
+    sip_summary = df_history.groupby('Ticker')['Total_Value'].sum().reset_index()
+    fig = px.bar(sip_summary, x='Ticker', y='Total_Value', title="Cumulative Investment per Stock")
+    st.plotly_chart(fig, use_container_width=True)
 except:
-    st.warning("Connect your Google Sheet CSV link in the code to see live trades here.")
+    st.info("💡 Connect your Google Sheet to see your SIP History chart here.")
+
+# 3. ANALYSIS & INSTRUCTIONS
+st.divider()
+st.subheader("🎯 This Fortnight's Strategy Analysis")
+
+if st.button("Run Deep Scan"):
+    universe = ["HAL.NS", "BEL.NS", "TRENT.NS", "ZOMATO.NS", "RELIANCE.NS", "TCS.NS", "ITC.NS", "BHARTIARTL.NS"]
+    analysis = get_detailed_rankings(universe)
+    
+    # EXACT INSTRUCTIONS BOX
+    st.warning("⚡ EXACT ACTIONS FOR YOUR ₹45,000:")
+    top_buys = analysis[analysis['Verdict'] == "💎 STRONG ACCUMULATE"].head(3)
+    
+    if not top_buys.empty:
+        for idx, row in top_buys.iterrows():
+            st.write(f"- **Invest ₹15,000 into {row['Ticker']}**: {row['Instruction']}")
+    else:
+        st.write("- **Hold Cash**: No stocks currently meet the 'Strong Accumulate' benchmark. Park ₹45k in a Liquid Fund.")
+
+    st.table(analysis)
