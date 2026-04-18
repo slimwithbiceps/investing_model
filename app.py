@@ -14,12 +14,23 @@ NIFTY_PE_BENCH = 21.4
 NIFTY_200_DMA = 25170
 
 def get_market_health():
+    # Fetching data
     nifty = yf.download("^NSEI", period="1y", interval="1d")
-    current_price = nifty['Close'].iloc[-1]
-    dma_200 = nifty['Close'].rolling(window=200).mean().iloc[-1]
-    daily_chg = nifty['Close'].pct_change().iloc[-1]
-    weekly_chg = (nifty['Close'].iloc[-1] / nifty['Close'].iloc[-5]) - 1
+    
+    # We use .iloc[-1] and force it to a float to avoid the "Series Ambiguity" error
+    # We also use .squeeze() to flatten the data if yfinance returns a MultiIndex
+    close_prices = nifty['Close'].squeeze() 
+    
+    current_price = float(close_prices.iloc[-1])
+    dma_200 = float(close_prices.rolling(window=200).mean().iloc[-1])
+    
+    daily_chg = float(close_prices.pct_change().iloc[-1])
+    # Weekly change (Current vs 5 days ago)
+    weekly_chg = float((close_prices.iloc[-1] / close_prices.iloc[-5]) - 1)
+    
+    # Now the comparison works because both sides are single numbers (floats)
     status = "🟢 BULLISH" if current_price > dma_200 else "🔴 CAUTION (Market Below 200-DMA)"
+    
     return status, daily_chg, weekly_chg, current_price
 
 def get_stock_analysis(tickers):
