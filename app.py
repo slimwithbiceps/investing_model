@@ -7,7 +7,7 @@ from datetime import datetime
 # --- CONFIG ---
 # Replace this with your Google Sheet "Export as CSV" link
 # To get this: File > Share > Publish to Web > Link > Entire Document > CSV
-SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1Q2lw-vTn4WUng4M2bzUimNs9aqSP4I_c6ModLTjFDgU/edit?usp=sharing" 
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?output=csv" 
 
 st.set_page_config(page_title="EMI-Shield: Command Center", layout="wide")
 
