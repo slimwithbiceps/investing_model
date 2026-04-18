@@ -62,7 +62,7 @@ if st.button("Run Market Scan"):
     ranks = get_rankings(universe)
     
     st.subheader("📊 Market Analysis & Benchmarks")
-    st.dataframe(ranks.style.applymap(lambda x: 'color: green' if x == 'PASS' else 'color: red', subset=['Status']))
+    st.dataframe(ranks.style.map(lambda x: 'color: green' if x == 'PASS' else 'color: red', subset=['Status']))
 
 # 3. GOOGLE SHEETS INTEGRATION (VIEWER)
 st.divider()
