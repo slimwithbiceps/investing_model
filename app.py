@@ -57,7 +57,15 @@ def run_full_analysis():
             elif score > 0.4: verdict = "✅ STABLE"
             else: verdict = "🛑 WEAK"
             
-            results.append({"Ticker": t.replace(".NS",""), "Sector": f_df.loc[t, "Sector"], "Verdict": verdict, "Efficiency": score, "6M Return": m_6m, "PE": pe, "Peer Median": s_pe})
+            results.append({
+                "Ticker": t.replace(".NS",""), 
+                "Sector": f_df.loc[t, "Sector"], 
+                "Verdict": verdict, 
+                "Momentum (6M)": m_6m,
+                "Efficiency": score, 
+                "PE": pe, 
+                "Peer Median": s_pe
+            })
         except: continue
     
     df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
@@ -65,7 +73,7 @@ def run_full_analysis():
     return df, c_nifty, dma, n_ret
 
 # --- 3. UI LAYOUT ---
-st.title("🛰️ EMI-Shield: Master Alpha Cockpit")
+st.title("🛡️ EMI-Shield: Master Alpha Cockpit")
 
 with st.expander("📖 DETAILED STRATEGY & GOALS", expanded=True):
     st.markdown("""
@@ -88,7 +96,6 @@ st.header("📈 Portfolio Performance Tracker")
 sel_sector = st.selectbox("Compare your Strategy against Sector:", list(SECTOR_INDICES.keys()))
 try:
     ledger = pd.read_csv(SHEET_URL)
-    # [Performance logic: Portfolio vs Nifty vs Sector Line Chart]
     st.info("Performance Chart will render here once Google Sheet data is live.")
 except:
     st.info("💡 Connect your Google Sheet to see performance charts.")
@@ -112,7 +119,15 @@ if st.button("🔍 AUDIT CURRENT HOLDINGS"):
             return "🔥 ELITE HOLD"
 
         my_holdings['Action'] = my_holdings.apply(audit_action, axis=1)
-        st.dataframe(my_holdings[['Ticker', 'Verdict', 'Action', 'Efficiency', 'PE']], use_container_width=True)
+        
+        st.dataframe(
+            my_holdings[['Ticker', 'Verdict', 'Action', 'Momentum (6M)', 'Efficiency', 'PE']], 
+            use_container_width=True,
+            column_config={
+                "Momentum (6M)": st.column_config.NumberColumn(format="%.1f%%"),
+                "Efficiency": st.column_config.ProgressColumn(min_value=0, max_value=2)
+            }
+        )
         
         to_recycle = my_holdings[my_holdings['Action'] == "🛑 SELL & RECYCLE"]
         if not to_recycle.empty:
@@ -138,8 +153,8 @@ if st.button("🚀 RUN GLOBAL ALPHA SCAN"):
     
     st.subheader("Full 50-Stock Market Rankings")
     st.dataframe(analysis_df, use_container_width=True, column_config={
+        "Momentum (6M)": st.column_config.ProgressColumn(min_value=-0.1, max_value=1.0),
         "Efficiency": st.column_config.ProgressColumn(min_value=0, max_value=2),
-        "6M Return": st.column_config.NumberColumn(format="%.1f%%"),
         "PE": st.column_config.NumberColumn("Stock PE"),
         "Peer Median": st.column_config.NumberColumn("Peer Median")
     })
@@ -149,18 +164,20 @@ st.divider()
 st.header("📚 The Investor's Dictionary (Layman Edition)")
 g1, g2 = st.columns(2)
 with g1:
-    with st.expander("📈 XIRR (Extended Internal Rate of Return)"):
+    with st.expander("📈 XIRR (Extended Internal Rate of Return)", expanded=True):
         st.write("**Full Form:** Extended Internal Rate of Return.")
         st.write("**Layman Terms:** Your 'Personal Interest Rate'. It accounts for the fact that you invest ₹25k at different dates. If this is higher than 7.65%, you are beating your car loan cost.")
         st.latex(r"XIRR \text{ Goal: } 12\%+")
     with st.expander("🚄 Momentum (Alpha)"):
-        st.write("**Full Form:** Relative Strength Index / Alpha.")
+        st.write("**Full Form:** Relative Strength / Positive Alpha.")
         st.write("**Layman Terms:** 'The Speedometer'. Does this stock run faster than the Nifty 50? If Nifty grows 2% and your stock grows 5%, your Alpha is 3%.")
+        st.write("**Formula:** $Alpha = R_p - [R_f + \beta(R_m - R_f)]$")
 with g2:
-    with st.expander("🎯 Efficiency (Sharpe Ratio)"):
+    with st.expander("🎯 Efficiency (Sharpe Ratio)", expanded=True):
         st.write("**Full Form:** Risk-Adjusted Return.")
         st.write("**Layman Terms:** 'The Smoothness Score'. We want stocks that go up in a straight line, not ones that jump up and down violently. High score = Smooth ride.")
-        st.latex(r"Efficiency = \frac{\text{Return}}{\text{Volatility}}")
+        st.latex(r"Efficiency = \frac{R_p - R_f}{\sigma_p}")
     with st.expander("🛡️ 200-DMA"):
         st.write("**Full Form:** 200-Day Moving Average.")
         st.write("**Layman Terms:** 'The Health Line'. If the Nifty is below this average price, the market is 'sick' and we hold cash to protect your EMI.")
+        st.write("**Formula:** $200DMA = \frac{\sum_{i=1}^{200} P_i}{200}$")
