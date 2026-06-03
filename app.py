@@ -167,18 +167,25 @@ try:
             try: 
                 # Grab the exact price for that day
                 val += row['Qty'] * stock_data.loc[d, t_mapped]
-            except Exception as inner_e: 
+            except Exception: 
                 pass # Skips if the stock didn't trade on that exact day (holidays)
             
         invested = active['Total_Value'].sum()
         port_returns_pct = ((val / invested) - 1) * 100 if invested > 0 else 0
         port_vals.append(port_returns_pct)
         
+    # 3. FIX: Safely slice the data forward, then grab the baseline values
+    nifty_series = macro_data["^NSEI"].dropna().loc[start_date:]
+    ndx_series = macro_data["^NDX"].dropna().loc[start_date:]
+    
+    nifty_base = nifty_series.iloc[0] if not nifty_series.empty else 1
+    ndx_base = ndx_series.iloc[0] if not ndx_series.empty else 1
+        
     perf = pd.DataFrame({
         "Date": dates, 
         "My Strategy Portfolio (%)": port_vals, 
-        "Nifty 50 (India %)": ((macro_data["^NSEI"].dropna().loc[start_date:] / macro_data["^NSEI"].dropna().loc[start_date].iloc[0]) - 1) * 100,
-        "NASDAQ 100 (US %)": ((macro_data["^NDX"].dropna().loc[start_date:] / macro_data["^NDX"].dropna().loc[start_date].iloc[0]) - 1) * 100,
+        "Nifty 50 (India %)": ((nifty_series / nifty_base) - 1) * 100,
+        "NASDAQ 100 (US %)": ((ndx_series / ndx_base) - 1) * 100,
         "Tax-Adjusted Hurdle Line (9.54%)": (((1 + TAX_ADJUSTED_TARGET)**((dates - start_date).days/365)) - 1) * 100
     })
     
