@@ -5,14 +5,15 @@ import numpy as np
 import plotly.express as px
 from datetime import datetime
 
-# --- 1. SETTINGS & CONSTANTS ---
+# --- 1. SETTINGS & LOAN CONSTANTS ---
 st.set_page_config(page_title="EMI-Shield Global Cockpit", layout="wide")
 
-LOAN_APR = 0.0763  
-TAX_ADJUSTED_TARGET = 0.0954 
+LOAN_APR = 0.0763  # 7.63% APR from Indian Bank Sanction[cite: 1]
+TAX_RATE = 0.20
+TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% after-tax target hurdle
 FORTNIGHTLY_SIP = 20000 
 PER_STOCK_SIP = 6667 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pubhtml" 
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pubhtml"
 
 # GLOBAL UNIVERSE (India Top 75 + US Top 25)
 INDIAN_STOCKS = [
@@ -37,7 +38,7 @@ UNIVERSE = INDIAN_STOCKS + US_STOCKS
 
 # --- 2. DATA ENGINES & SAFETY FILTERS ---
 def get_safe_last(series, fallback=0.0):
-    """Safety net for yfinance empty data errors."""
+    """Prevents out-of-bounds IndexError if a market holiday returns empty data."""
     return float(series.iloc[-1]) if not series.empty else fallback
 
 @st.cache_data(ttl=86400)
@@ -46,8 +47,9 @@ def fetch_macro_and_markets():
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
     return macro, stocks
 
-def analyze_markets(macro, stocks):
-    # ROBUST MACRO HEALTH EXTRACTION
+def analyze_markets(macro, stock_data_raw):
+    # Synchronize calendars via forward-filling to bridge time-zone gaps
+    stocks = stock_data_raw.ffill().bfill()
     nifty = macro["^NSEI"].dropna()
     ndx = macro["^NDX"].dropna()
     vix = macro["^INDIAVIX"].dropna()
@@ -56,7 +58,7 @@ def analyze_markets(macro, stocks):
     c_nifty = get_safe_last(nifty)
     dma_200 = get_safe_last(nifty.rolling(200).mean(), c_nifty)
     c_vix = get_safe_last(vix, 15.0)
-    c_usd = get_safe_last(usd_inr, 83.50) # Fallback to average exchange rate if API fails
+    c_usd = get_safe_last(usd_inr, 83.50)
     
     macro_status = {
         "Nifty_Trend": "🟢" if c_nifty > dma_200 else "🔴",
@@ -66,12 +68,11 @@ def analyze_markets(macro, stocks):
         "Global_Clear": True if (c_nifty > dma_200) and (c_vix < 22) else False
     }
 
-    # STOCK ANALYSIS (14-Day Smoothing)
+    # 14-Day Smoothed Alpha and Risk Modeling
     m_6m = ((stocks / stocks.shift(126)) - 1).rolling(14).mean()
     vol = (stocks.pct_change().rolling(126).std() * np.sqrt(252)).rolling(14).mean()
     efficiency = m_6m / vol
     
-    # Benchmarks (Safe calculation)
     n_ret = (c_nifty / get_safe_last(nifty.shift(126), c_nifty)) - 1
     ndx_ret = (get_safe_last(ndx) / get_safe_last(ndx.shift(126), get_safe_last(ndx))) - 1
     
@@ -81,14 +82,13 @@ def analyze_markets(macro, stocks):
             is_us = t in US_STOCKS
             bench_ret = ndx_ret if is_us else n_ret
             
-            # Use safe retrieval for specific stock metrics
             score = get_safe_last(efficiency[t].dropna())
             stock_mom = get_safe_last(m_6m[t].dropna())
             current_price = get_safe_last(stocks[t].dropna())
             
-            if current_price == 0.0: continue # Skip if stock data is totally missing
+            if current_price == 0.0: continue
             
-            # Dynamic Stop Loss (15% below 52-week High)
+            # Trailing Stop-Loss Engine (15% below peak values)
             high_52w = stocks[t].max()
             stop_loss = high_52w * 0.85
             dist_to_stop = ((current_price - stop_loss) / current_price) * 100
@@ -99,6 +99,7 @@ def analyze_markets(macro, stocks):
                 "Ticker": t.replace(".NS",""), 
                 "Region": "US" if is_us else "India",
                 "Verdict": verdict, 
+                "Momentum": stock_mom,
                 "Efficiency": score, 
                 "Price": current_price,
                 "Stop-Loss Level": stop_loss,
@@ -107,21 +108,21 @@ def analyze_markets(macro, stocks):
         except: continue
         
     df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
-    df.index += 1
+    df.index += 1  # Standardizes clean serial number ordering
     return df, macro_status
 
-# --- UI SECTION ---
-st.title("🌍 EMI-Shield: Global Macro Cockpit")
+# --- 3. UI LAYOUT ---
+st.title("🌍 EMI-Shield: Global Master Alpha Cockpit")
 
-with st.expander("📖 DETAILED STRATEGY & LOAN GOALS", expanded=True):
+with st.expander("📖 DETAILED STRATEGY & TAX-ADJUSTED GOALS", expanded=True):
     st.markdown(f"""
-    **Mission:** Offset the **{LOAN_APR*100:.2f}% Loan APR** after-tax.
-    - **Tax-Adjusted Goal:** **9.54%** (Covers loan cost + 20% STCG tax).
-    - **Macro Safety:** Deployment halts if Nifty drops below 200-DMA or India VIX exceeds 22.
-    - **Stop-Loss Protection:** A dynamic trailing stop-loss triggers a sell if any stock drops 15% from its 52-week high.
+    **Mission:** Completely offset your **{LOAN_APR*100:.2f}% Indian Bank Loan APR** after-tax[cite: 1].
+    - **Loan Ledger:** ₹20,20,000 Principle | Monthly EMI: ₹40,573[cite: 1, 2].
+    - **Tax Hurdles:** Capital is benchmarked to a **9.54% gross line** to easily absorb a 20% Short-Term Capital Gains (STCG) tax penalty.
+    - **Volatility Shields:** Fresh deployments pause instantly if Nifty breaks below its 200-DMA or India VIX trends above 22.
     """)
 
-# 1. MACRO DASHBOARD
+# MACRO OVERVIEW STATUS
 macro_data, stock_data = fetch_macro_and_markets()
 analysis_df, m_status = analyze_markets(macro_data, stock_data)
 
@@ -129,15 +130,15 @@ st.header("🧭 Global Macro Environment")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Nifty 50 Trend", m_status["Nifty_Trend"])
 c2.metric("India VIX (Fear Gauge)", m_status["VIX_Level"], f"{m_status['VIX_Val']:.1f}")
-c3.metric("USD/INR", f"₹{m_status['USD_INR']:.2f}")
+c3.metric("USD / INR Exchange", f"₹{m_status['USD_INR']:.2f}")
 if m_status["Global_Clear"]:
-    c4.success("🟢 ALL CLEAR FOR DEPLOYMENT")
+    c4.success("🟢 ALL SYSTEMS CLEAR FOR DEPLOYMENT")
 else:
-    c4.error("🔴 MACRO WARNING: HOLD CASH")
+    c4.error("🔴 MACRO HAZARD: DEPLOYMENT HALTED")
 
-# 2. PERFORMANCE CHART
+# --- PERFORMANCE LINE CHART ---
 st.divider()
-st.header("📈 Global Portfolio Returns vs Targets")
+st.header("📈 Strategy Returns Performance Chart (%)")
 try:
     ledger = pd.read_csv(SHEET_URL)
     ledger['Date'] = pd.to_datetime(ledger['Date'], dayfirst=False)
@@ -160,73 +161,85 @@ try:
             except: pass
             
         invested = active['Total_Value'].sum()
-        port_vals.append((val / invested) - 1 if invested > 0 else 0)
+        port_returns_pct = ((val / invested) - 1) * 100 if invested > 0 else 0
+        port_vals.append(port_returns_pct)
         
     perf = pd.DataFrame({
         "Date": dates, 
-        "Portfolio": port_vals, 
-        "Nifty 50 (India)": (macro_data["^NSEI"].dropna().loc[start_date:] / macro_data["^NSEI"].dropna().loc[start_date].iloc[0]) - 1,
-        "NASDAQ 100 (US)": (macro_data["^NDX"].dropna().loc[start_date:] / macro_data["^NDX"].dropna().loc[start_date].iloc[0]) - 1,
-        "Tax-Adj Goal (9.54%)": (1 + TAX_ADJUSTED_TARGET)**((dates - start_date).days/365) - 1
+        "My Strategy Portfolio (%)": port_vals, 
+        "Nifty 50 (India %)": ((macro_data["^NSEI"].dropna().loc[start_date:] / macro_data["^NSEI"].dropna().loc[start_date].iloc[0]) - 1) * 100,
+        "NASDAQ 100 (US %)": ((macro_data["^NDX"].dropna().loc[start_date:] / macro_data["^NDX"].dropna().loc[start_date].iloc[0]) - 1) * 100,
+        "Tax-Adjusted Hurdle Line (9.54%)": (((1 + TAX_ADJUSTED_TARGET)**((dates - start_date).days/365)) - 1) * 100
     })
     
-    fig = px.line(perf, x="Date", y=["Portfolio", "Nifty 50 (India)", "NASDAQ 100 (US)", "Tax-Adj Goal (9.54%)"])
-    fig.update_traces(line=dict(dash='dash', color='red'), selector=dict(name="Tax-Adj Goal (9.54%)"))
+    fig = px.line(perf, x="Date", y=["My Strategy Portfolio (%)", "Nifty 50 (India %)", "NASDAQ 100 (US %)", "Tax-Adjusted Hurdle Line (9.54%)"])
+    fig.update_traces(line=dict(dash='dash', color='red'), selector=dict(name="Tax-Adjusted Hurdle Line (9.54%)"))
     st.plotly_chart(fig, use_container_width=True)
-except Exception as e:
-    st.info("💡 Chart requires Google Sheet with columns: Date, Ticker, Qty, BuyPrice, Total_Value")
+except:
+    st.info("💡 Chart auto-generates in % once the Google Sheet is linked with formatted Date, Ticker, Qty, and Total_Value entries.")
 
-# 3. AUDIT & STOP-LOSS ENGINE
+# --- THE AUDIT & STOP-LOSS ENGINE ---
 st.divider()
-st.header("🛡️ Portfolio Audit & Stop-Loss Engine")
-if st.button("🔍 AUDIT CURRENT HOLDINGS"):
+st.header("♻️ Strategy Portfolio Audit & Stop-Loss Engine")
+if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
     try:
         ledger = pd.read_csv(SHEET_URL)
         audit = ledger.merge(analysis_df, on="Ticker", how="left")
         
         def audit_action(row):
-            if pd.isna(row['Buffer to SL']): return "⚠️ DATA MISSING"
-            if float(row['Buffer to SL'].strip('%')) <= 0: return "🚨 STOP-LOSS HIT: SELL"
-            if row['Verdict'] == "🛑 WEAK": return "🛑 RECYCLE (SELL)"
-            return "💎 HOLD"
+            if pd.isna(row['Buffer to SL']): return "⚠️ GAP DATA"
+            if float(row['Buffer to SL'].strip('%')) <= 0: return "🚨 STOP-LOSS HIT: LIQUIDATE"
+            if row['Verdict'] == "🛑 WEAK": return "🛑 RECYCLE ASSETS (SELL)"
+            return "💎 UNCONDITIONAL HOLD"
             
         audit['Action'] = audit.apply(audit_action, axis=1)
-        st.dataframe(audit[['Ticker', 'Region', 'Action', 'Efficiency', 'Price', 'Stop-Loss Level', 'Buffer to SL']], use_container_width=True)
+        st.dataframe(audit[['Ticker', 'Region', 'Action', 'Verdict', 'Momentum', 'Efficiency', 'Price', 'Stop-Loss Level', 'Buffer to SL']], use_container_width=True,
+                     column_config={"Momentum": st.column_config.NumberColumn(format="%.2f%%"), "Efficiency": st.column_config.NumberColumn(format="%.2f")})
         
-        to_sell = audit[audit['Action'].str.contains("SELL")]
+        to_sell = audit[audit['Action'].str.contains("SELL|LIQUIDATE")]
         if not to_sell.empty:
-            st.error(f"Action Required: Sell {', '.join(to_sell['Ticker'].tolist())}")
-    except: st.error("Audit failed. Check Google Sheet.")
+            st.error(f"Execution Recommended: Sell out of {', '.join(to_sell['Ticker'].tolist())} entries.")
+    except: 
+        st.error("Audit processing failed. Ensure your spreadsheet labels match clean corporate tickers like 'HAL' or 'NVDA'.")
 
-# 4. GLOBAL DEPLOYMENT
+# --- GLOBAL DEPLOYMENT CONTROLLER ---
 st.divider()
-st.header(f"🎯 Global Deployment: Fresh ₹{FORTNIGHTLY_SIP}")
-if st.button("🚀 RUN GLOBAL ALPHA SCAN"):
+st.header(f"🎯 Fortnightly Deployment Portal: Fresh ₹{FORTNIGHTLY_SIP:,}")
+if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
     if not m_status["Global_Clear"]:
-        st.warning("⚠️ Macro Indicators are flashing Red. We recommend pausing deployments and holding cash this fortnight to protect your EMI reserves.")
+        st.warning("⚠️ Macro Indicators have breached threshold boundaries. Capital preservation protocol active: hold cash reserves.")
     
-    st.subheader("Top Global Elite Picks")
+    st.subheader("High-Conviction Global Selections")
     elites = analysis_df[analysis_df['Verdict'] == "💎 ELITE"].head(3)
     cols = st.columns(3)
     for i, (idx, row) in enumerate(elites.iterrows()):
-        cols[i].metric(f"{row['Ticker']} ({row['Region']})", f"₹{PER_STOCK_SIP}", f"Buffer to SL: {row['Buffer to SL']}")
+        cols[i].metric(f"{row['Ticker']} ({row['Region']})", f"₹{PER_STOCK_SIP:,}", f"SL Buffer: {row['Buffer to SL']}")
     
+    st.subheader("Complete Global Universe Metrics Rankings")
     st.dataframe(analysis_df, column_config={
-        "Efficiency": st.column_config.ProgressColumn(min_value=0, max_value=2),
-        "Price": st.column_config.NumberColumn(format="%.2f")
+        "Momentum": st.column_config.NumberColumn("Momentum (6M Smoothed)", format="%.1f%%"),
+        "Efficiency": st.column_config.ProgressColumn("Efficiency (Risk-Adj)", min_value=0, max_value=2, format="%.2f"),
+        "Price": st.column_config.NumberColumn("Current Price", format="%.2f"),
+        "Stop-Loss Level": st.column_config.NumberColumn("Trailing Stop-Loss", format="%.2f")
     }, use_container_width=True)
 
-# 5. GLOSSARY
+# --- LAYMAN'S FINANCE EXPANDED DICTIONARY ---
 st.divider()
-st.header("📚 The Investor's Dictionary")
-c1, c2 = st.columns(2)
-with c1:
-    with st.expander("📉 Trailing Stop-Loss", expanded=True):
-        st.write("A moving safety net. As the stock's price goes up, the stop-loss goes up with it, locking in profits. If it drops 15% from its peak, the dashboard triggers a sell.")
-    with st.expander("🦅 NASDAQ-100 Benchmark"):
-        st.write("US Tech stocks are compared against the US market, not India, ensuring we are picking the true global winners.")
-with c2:
-    with st.expander("😨 India VIX (Fear Gauge)", expanded=True):
-        st.write("Measures how violently the market is swinging. Below 15 is calm. Above 22 is panic. We don't deploy fresh cash in a panic.")
-    with st.expander("🎯 Efficiency (Smoothed)"):
-        st.write("Measures 'Smoothness' using a 14-day average. This prevents a single bad day of news from tricking the system into selling a good stock.")
+st.header("📚 The Investor's Dictionary (Layman Edition)")
+col_g1, col_g2 = st.columns(2)
+with col_g1:
+    with st.expander("📈 XIRR (Extended Internal Rate of Return)", expanded=True):
+        st.write("**Full Form:** Extended Internal Rate of Return.")
+        st.write("**Plain English:** Your personal investment speedometer. Regular returns assume you put in all your money on day one. Because you drop in ₹20,000 blocks sequentially every fortnight, XIRR dynamically tracks how hard every individual rupee is working based on its specific entry date.")
+        st.latex(r"NPV = \sum_{i=1}^{N} \frac{P_i}{(1 + r)^{\frac{d_i - d_1}{365}}} = 0")
+    with st.expander("🚄 Momentum (Alpha)"):
+        st.write("**Full Form:** Relative Price Momentum vs. Benchmarks.")
+        st.write("**Plain English:** Pure acceleration. We reject sluggish stocks. This tracks whether a selection is running significantly faster than the baseline market indices (^NSEI for India or ^NDX for the US tech market).")
+with col_g2:
+    with st.expander("🎯 Efficiency (Sharpe Ratio Score)", expanded=True):
+        st.write("**Full Form:** Sharpe Ratio / Risk-Adjusted Return Profiles.")
+        st.write("**Plain English:** Ride smoothness. If Stock A and Stock B both return 20%, but Stock A goes up in a calm, steady line while Stock B experiences massive, gut-wrenching daily spikes, Stock A has a much higher Efficiency Score. Because you have a locked-in ₹40,573 auto-debit obligation every month, we aggressively prioritize high-efficiency, low-volatility assets to minimize portfolio stress[cite: 1, 2].")
+        st.latex(r"Sharpe = \frac{R_p - R_f}{\sigma_p}")
+    with st.expander("🛡️ Trailing Stop-Loss Protection"):
+        st.write("**Full Form:** Maximum Peak-to-Trough Capital Ceiling Safeguard.")
+        st.write("**Plain English:** An automated profit lock. A standard stop-loss stays fixed forever. A *trailing* stop-loss acts like an escalator: as your stock climbs to new all-time highs, your floor rises directly behind it (anchored exactly 15% below peak price values). If market trends break down, it triggers a liquidate warning to salvage your profits.")
