@@ -13,7 +13,7 @@ TAX_RATE = 0.20
 TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% after-tax target hurdle
 FORTNIGHTLY_SIP = 20000 
 PER_STOCK_SIP = 6667 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pubhtml"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv"
 
 # GLOBAL UNIVERSE (India Top 75 + US Top 25)
 INDIAN_STOCKS = [
