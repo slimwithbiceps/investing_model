@@ -140,8 +140,13 @@ else:
 st.divider()
 st.header("📈 Strategy Returns Performance Chart (%)")
 try:
+    # 1. Read and normalize the Google Sheet dates
     ledger = pd.read_csv(SHEET_URL)
-    ledger['Date'] = pd.to_datetime(ledger['Date'], dayfirst=False)
+    ledger['Date'] = pd.to_datetime(ledger['Date'], dayfirst=False).dt.tz_localize(None)
+    
+    # 2. Strip timezones from yfinance data to match the ledger
+    macro_data.index = macro_data.index.tz_localize(None)
+    stock_data.index = stock_data.index.tz_localize(None)
     
     start_date = ledger['Date'].min()
     dates = macro_data["^NSEI"].dropna().loc[start_date:].index
@@ -156,9 +161,14 @@ try:
         val = 0
         for _, row in active.iterrows():
             ticker = row['Ticker']
+            # Map Indian stocks to .NS format for the chart
             t_mapped = f"{ticker}.NS" if ticker in [t.replace(".NS","") for t in INDIAN_STOCKS] else ticker
-            try: val += row['Qty'] * stock_data.loc[d, t_mapped]
-            except: pass
+            
+            try: 
+                # Grab the exact price for that day
+                val += row['Qty'] * stock_data.loc[d, t_mapped]
+            except Exception as inner_e: 
+                pass # Skips if the stock didn't trade on that exact day (holidays)
             
         invested = active['Total_Value'].sum()
         port_returns_pct = ((val / invested) - 1) * 100 if invested > 0 else 0
@@ -175,8 +185,10 @@ try:
     fig = px.line(perf, x="Date", y=["My Strategy Portfolio (%)", "Nifty 50 (India %)", "NASDAQ 100 (US %)", "Tax-Adjusted Hurdle Line (9.54%)"])
     fig.update_traces(line=dict(dash='dash', color='red'), selector=dict(name="Tax-Adjusted Hurdle Line (9.54%)"))
     st.plotly_chart(fig, use_container_width=True)
-except:
-    st.info("💡 Chart auto-generates in % once the Google Sheet is linked with formatted Date, Ticker, Qty, and Total_Value entries.")
+
+except Exception as e:
+    st.error(f"🚨 Chart Generation Failed! Error details: {e}")
+    st.info("💡 Make sure your Google Sheet link ends with '/pub?output=csv' and your columns exactly match: Date, Ticker, Qty, BuyPrice, Total_Value")
 
 # --- THE AUDIT & STOP-LOSS ENGINE ---
 st.divider()
