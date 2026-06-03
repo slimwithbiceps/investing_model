@@ -8,12 +8,12 @@ from datetime import datetime
 # --- 1. SETTINGS & LOAN CONSTANTS ---
 st.set_page_config(page_title="EMI-Shield Global Cockpit", layout="wide")
 
-LOAN_APR = 0.0763  # 7.63% APR from Indian Bank Sanction[cite: 1]
+LOAN_APR = 0.0763  # 7.63% Indian Bank APR[cite: 1]
 TAX_RATE = 0.20
-TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% after-tax target hurdle
+TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% Gross Target
 FORTNIGHTLY_SIP = 20000 
 PER_STOCK_SIP = 6667 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv" 
 
 # GLOBAL UNIVERSE (India Top 75 + US Top 25)
 INDIAN_STOCKS = [
@@ -38,7 +38,6 @@ UNIVERSE = INDIAN_STOCKS + US_STOCKS
 
 # --- 2. DATA ENGINES & SAFETY FILTERS ---
 def get_safe_last(series, fallback=0.0):
-    """Prevents out-of-bounds IndexError if a market holiday returns empty data."""
     return float(series.iloc[-1]) if not series.empty else fallback
 
 @st.cache_data(ttl=86400)
@@ -48,7 +47,6 @@ def fetch_macro_and_markets():
     return macro, stocks
 
 def analyze_markets(macro, stock_data_raw):
-    # Synchronize calendars via forward-filling to bridge time-zone gaps
     stocks = stock_data_raw.ffill().bfill()
     nifty = macro["^NSEI"].dropna()
     ndx = macro["^NDX"].dropna()
@@ -68,7 +66,6 @@ def analyze_markets(macro, stock_data_raw):
         "Global_Clear": True if (c_nifty > dma_200) and (c_vix < 22) else False
     }
 
-    # 14-Day Smoothed Alpha and Risk Modeling
     m_6m = ((stocks / stocks.shift(126)) - 1).rolling(14).mean()
     vol = (stocks.pct_change().rolling(126).std() * np.sqrt(252)).rolling(14).mean()
     efficiency = m_6m / vol
@@ -88,7 +85,6 @@ def analyze_markets(macro, stock_data_raw):
             
             if current_price == 0.0: continue
             
-            # Trailing Stop-Loss Engine (15% below peak values)
             high_52w = stocks[t].max()
             stop_loss = high_52w * 0.85
             dist_to_stop = ((current_price - stop_loss) / current_price) * 100
@@ -108,7 +104,7 @@ def analyze_markets(macro, stock_data_raw):
         except: continue
         
     df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
-    df.index += 1  # Standardizes clean serial number ordering
+    df.index += 1  
     return df, macro_status
 
 # --- 3. UI LAYOUT ---
@@ -118,11 +114,10 @@ with st.expander("📖 DETAILED STRATEGY & TAX-ADJUSTED GOALS", expanded=True):
     st.markdown(f"""
     **Mission:** Completely offset your **{LOAN_APR*100:.2f}% Indian Bank Loan APR** after-tax[cite: 1].
     - **Loan Ledger:** ₹20,20,000 Principle | Monthly EMI: ₹40,573[cite: 1, 2].
-    - **Tax Hurdles:** Capital is benchmarked to a **9.54% gross line** to easily absorb a 20% Short-Term Capital Gains (STCG) tax penalty.
+    - **Tax Hurdles:** Capital is benchmarked to a **9.54% gross line** to absorb a 20% Short-Term Capital Gains (STCG) tax penalty.
     - **Volatility Shields:** Fresh deployments pause instantly if Nifty breaks below its 200-DMA or India VIX trends above 22.
     """)
 
-# MACRO OVERVIEW STATUS
 macro_data, stock_data = fetch_macro_and_markets()
 analysis_df, m_status = analyze_markets(macro_data, stock_data)
 
@@ -140,63 +135,68 @@ else:
 st.divider()
 st.header("📈 Strategy Returns Performance Chart (%)")
 try:
-    # 1. Read and normalize the Google Sheet dates
     ledger = pd.read_csv(SHEET_URL)
     ledger['Date'] = pd.to_datetime(ledger['Date'], dayfirst=False).dt.tz_localize(None)
     
-    # 2. Strip timezones from yfinance data to match the ledger
     macro_data.index = macro_data.index.tz_localize(None)
     stock_data.index = stock_data.index.tz_localize(None)
     
-    start_date = ledger['Date'].min()
-    # Define master calendar timeline based on when the Indian market was open
-    dates = macro_data["^NSEI"].dropna().loc[start_date:].index
+    # Force baseline timeline to track from May 1st, 2026
+    chart_start_date = pd.to_datetime('2026-05-01')
+    dates = macro_data["^NSEI"].dropna().loc[chart_start_date:].index
+    
+    # Establish entry boundaries for portfolio lines
+    first_purchase_date = ledger['Date'].min() if not ledger.empty else pd.to_datetime('2026-12-31')
     port_vals = []
     
     for d in dates:
+        # Before actual asset acquisition, assign NaN to keep line blank
+        if d < first_purchase_date:
+            port_vals.append(np.nan)
+            continue
+            
         active = ledger[ledger['Date'] <= d]
         if active.empty:
-            port_vals.append(0)
+            port_vals.append(0.0)
             continue
         
         val = 0
         for _, row in active.iterrows():
             ticker = row['Ticker']
-            # Map Indian stocks to .NS format for the chart
             t_mapped = f"{ticker}.NS" if ticker in [t.replace(".NS","") for t in INDIAN_STOCKS] else ticker
-            
-            try: 
-                # Grab the exact price for that day
-                val += row['Qty'] * stock_data.loc[d, t_mapped]
-            except Exception: 
-                pass # Skips if the stock didn't trade on that exact day (holidays)
+            try: val += row['Qty'] * stock_data.loc[d, t_mapped]
+            except: pass
             
         invested = active['Total_Value'].sum()
         port_returns_pct = ((val / invested) - 1) * 100 if invested > 0 else 0
-        port_vals.append(port_returns_pct)
+        port_vals.append(round(port_returns_pct, 2))
         
-    # 3. FIX: Reindex both series to the master 'dates' timeline and fill holiday gaps to align lengths perfectly
-    nifty_series = macro_data["^NSEI"].loc[start_date:].reindex(dates).ffill().bfill()
-    ndx_series = macro_data["^NDX"].loc[start_date:].reindex(dates).ffill().bfill()
+    nifty_series = macro_data["^NSEI"].loc[chart_start_date:].reindex(dates).ffill().bfill()
+    ndx_series = macro_data["^NDX"].loc[chart_start_date:].reindex(dates).ffill().bfill()
     
     nifty_base = nifty_series.iloc[0] if not nifty_series.empty else 1
     ndx_base = ndx_series.iloc[0] if not ndx_series.empty else 1
+    
+    nifty_pct = (((nifty_series / nifty_base) - 1) * 100).round(2)
+    ndx_pct = (((ndx_series / ndx_base) - 1) * 100).round(2)
+    hurdle_pct = ((((1 + TAX_ADJUSTED_TARGET)**((dates - chart_start_date).days/365)) - 1) * 100).round(2)
         
     perf = pd.DataFrame({
         "Date": dates, 
-        "My Strategy Portfolio (%)": port_vals, 
-        "Nifty 50 (India %)": ((nifty_series / nifty_base) - 1) * 100,
-        "NASDAQ 100 (US %)": ((ndx_series / ndx_base) - 1) * 100,
-        "Tax-Adjusted Hurdle Line (9.54%)": (((1 + TAX_ADJUSTED_TARGET)**((dates - start_date).days/365)) - 1) * 100
+        "My Portfolio (%)": port_vals, 
+        "Nifty 50 (India) (%)": nifty_pct,
+        "NASDAQ 100 (US) (%)": ndx_pct,
+        "Tax-Adjusted Hurdle Line (9.54%)": hurdle_pct
     }, index=dates)
     
-    fig = px.line(perf, x="Date", y=["My Strategy Portfolio (%)", "Nifty 50 (India %)", "NASDAQ 100 (US %)", "Tax-Adjusted Hurdle Line (9.54%)"])
+    fig = px.line(perf, x="Date", y=["My Portfolio (%)", "Nifty 50 (India) (%)", "NASDAQ 100 (US) (%)", "Tax-Adjusted Hurdle Line (9.54%)"],
+                  labels={"value": "Return (%)", "variable": "Market Metrics"})
+    
     fig.update_traces(line=dict(dash='dash', color='red'), selector=dict(name="Tax-Adjusted Hurdle Line (9.54%)"))
+    fig.update_layout(yaxis_title="Return (%)", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
-
 except Exception as e:
-    st.error(f"🚨 Chart Generation Failed! Error details: {e}")
-    st.info("💡 Make sure your Google Sheet link ends with '/pub?output=csv' and your columns exactly match: Date, Ticker, Qty, BuyPrice, Total_Value")
+    st.info("💡 Chart begins from May 1. Complete ledger data required to overlay custom performance plots.")
 
 # --- THE AUDIT & STOP-LOSS ENGINE ---
 st.divider()
