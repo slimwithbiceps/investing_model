@@ -35,51 +35,65 @@ US_STOCKS = [
 ]
 UNIVERSE = INDIAN_STOCKS + US_STOCKS
 
-# --- 2. DATA ENGINES ---
+# --- 2. DATA ENGINES & SAFETY FILTERS ---
+def get_safe_last(series, fallback=0.0):
+    """Safety net for yfinance empty data errors."""
+    return float(series.iloc[-1]) if not series.empty else fallback
+
 @st.cache_data(ttl=86400)
 def fetch_macro_and_markets():
-    # Macro Indicators
     macro = yf.download(["^NSEI", "^NDX", "^INDIAVIX", "INR=X"], period="1y", interval="1d")['Close']
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
     return macro, stocks
 
 def analyze_markets(macro, stocks):
-    # MACRO HEALTH
+    # ROBUST MACRO HEALTH EXTRACTION
     nifty = macro["^NSEI"].dropna()
+    ndx = macro["^NDX"].dropna()
     vix = macro["^INDIAVIX"].dropna()
     usd_inr = macro["INR=X"].dropna()
     
+    c_nifty = get_safe_last(nifty)
+    dma_200 = get_safe_last(nifty.rolling(200).mean(), c_nifty)
+    c_vix = get_safe_last(vix, 15.0)
+    c_usd = get_safe_last(usd_inr, 83.50) # Fallback to average exchange rate if API fails
+    
     macro_status = {
-        "Nifty_Trend": "🟢" if nifty.iloc[-1] > nifty.rolling(200).mean().iloc[-1] else "🔴",
-        "VIX_Level": "🟢 (Calm)" if vix.iloc[-1] < 15 else ("🟡 (Elevated)" if vix.iloc[-1] < 22 else "🔴 (Panic)"),
-        "VIX_Val": vix.iloc[-1],
-        "USD_INR": usd_inr.iloc[-1],
-        "Global_Clear": True if (nifty.iloc[-1] > nifty.rolling(200).mean().iloc[-1]) and (vix.iloc[-1] < 22) else False
+        "Nifty_Trend": "🟢" if c_nifty > dma_200 else "🔴",
+        "VIX_Level": "🟢 (Calm)" if c_vix < 15 else ("🟡 (Elevated)" if c_vix < 22 else "🔴 (Panic)"),
+        "VIX_Val": c_vix,
+        "USD_INR": c_usd,
+        "Global_Clear": True if (c_nifty > dma_200) and (c_vix < 22) else False
     }
 
     # STOCK ANALYSIS (14-Day Smoothing)
     m_6m = ((stocks / stocks.shift(126)) - 1).rolling(14).mean()
     vol = (stocks.pct_change().rolling(126).std() * np.sqrt(252)).rolling(14).mean()
-    efficiency = (m_6m / vol).iloc[-1]
+    efficiency = m_6m / vol
     
-    # Benchmarks
-    n_ret = ((nifty.iloc[-1] / nifty.iloc[-126]) - 1)
-    ndx_ret = ((macro["^NDX"].dropna().iloc[-1] / macro["^NDX"].dropna().iloc[-126]) - 1)
+    # Benchmarks (Safe calculation)
+    n_ret = (c_nifty / get_safe_last(nifty.shift(126), c_nifty)) - 1
+    ndx_ret = (get_safe_last(ndx) / get_safe_last(ndx.shift(126), get_safe_last(ndx))) - 1
     
     results = []
     for t in UNIVERSE:
         try:
             is_us = t in US_STOCKS
             bench_ret = ndx_ret if is_us else n_ret
-            score = efficiency[t]
+            
+            # Use safe retrieval for specific stock metrics
+            score = get_safe_last(efficiency[t].dropna())
+            stock_mom = get_safe_last(m_6m[t].dropna())
+            current_price = get_safe_last(stocks[t].dropna())
+            
+            if current_price == 0.0: continue # Skip if stock data is totally missing
             
             # Dynamic Stop Loss (15% below 52-week High)
             high_52w = stocks[t].max()
-            current_price = stocks[t].iloc[-1]
             stop_loss = high_52w * 0.85
             dist_to_stop = ((current_price - stop_loss) / current_price) * 100
             
-            verdict = "💎 ELITE" if (m_6m[t].iloc[-1] > bench_ret and score > 0.8) else ("✅ STABLE" if score > 0.4 else "🛑 WEAK")
+            verdict = "💎 ELITE" if (stock_mom > bench_ret and score > 0.8) else ("✅ STABLE" if score > 0.4 else "🛑 WEAK")
             
             results.append({
                 "Ticker": t.replace(".NS",""), 
@@ -98,6 +112,14 @@ def analyze_markets(macro, stocks):
 
 # --- UI SECTION ---
 st.title("🌍 EMI-Shield: Global Macro Cockpit")
+
+with st.expander("📖 DETAILED STRATEGY & LOAN GOALS", expanded=True):
+    st.markdown(f"""
+    **Mission:** Offset the **{LOAN_APR*100:.2f}% Loan APR** after-tax.
+    - **Tax-Adjusted Goal:** **9.54%** (Covers loan cost + 20% STCG tax).
+    - **Macro Safety:** Deployment halts if Nifty drops below 200-DMA or India VIX exceeds 22.
+    - **Stop-Loss Protection:** A dynamic trailing stop-loss triggers a sell if any stock drops 15% from its 52-week high.
+    """)
 
 # 1. MACRO DASHBOARD
 macro_data, stock_data = fetch_macro_and_markets()
@@ -151,7 +173,7 @@ try:
     fig = px.line(perf, x="Date", y=["Portfolio", "Nifty 50 (India)", "NASDAQ 100 (US)", "Tax-Adj Goal (9.54%)"])
     fig.update_traces(line=dict(dash='dash', color='red'), selector=dict(name="Tax-Adj Goal (9.54%)"))
     st.plotly_chart(fig, use_container_width=True)
-except:
+except Exception as e:
     st.info("💡 Chart requires Google Sheet with columns: Date, Ticker, Qty, BuyPrice, Total_Value")
 
 # 3. AUDIT & STOP-LOSS ENGINE
@@ -163,6 +185,7 @@ if st.button("🔍 AUDIT CURRENT HOLDINGS"):
         audit = ledger.merge(analysis_df, on="Ticker", how="left")
         
         def audit_action(row):
+            if pd.isna(row['Buffer to SL']): return "⚠️ DATA MISSING"
             if float(row['Buffer to SL'].strip('%')) <= 0: return "🚨 STOP-LOSS HIT: SELL"
             if row['Verdict'] == "🛑 WEAK": return "🛑 RECYCLE (SELL)"
             return "💎 HOLD"
@@ -192,3 +215,18 @@ if st.button("🚀 RUN GLOBAL ALPHA SCAN"):
         "Efficiency": st.column_config.ProgressColumn(min_value=0, max_value=2),
         "Price": st.column_config.NumberColumn(format="%.2f")
     }, use_container_width=True)
+
+# 5. GLOSSARY
+st.divider()
+st.header("📚 The Investor's Dictionary")
+c1, c2 = st.columns(2)
+with c1:
+    with st.expander("📉 Trailing Stop-Loss", expanded=True):
+        st.write("A moving safety net. As the stock's price goes up, the stop-loss goes up with it, locking in profits. If it drops 15% from its peak, the dashboard triggers a sell.")
+    with st.expander("🦅 NASDAQ-100 Benchmark"):
+        st.write("US Tech stocks are compared against the US market, not India, ensuring we are picking the true global winners.")
+with c2:
+    with st.expander("😨 India VIX (Fear Gauge)", expanded=True):
+        st.write("Measures how violently the market is swinging. Below 15 is calm. Above 22 is panic. We don't deploy fresh cash in a panic.")
+    with st.expander("🎯 Efficiency (Smoothed)"):
+        st.write("Measures 'Smoothness' using a 14-day average. This prevents a single bad day of news from tricking the system into selling a good stock.")
