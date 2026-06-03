@@ -149,6 +149,7 @@ try:
     stock_data.index = stock_data.index.tz_localize(None)
     
     start_date = ledger['Date'].min()
+    # Define master calendar timeline based on when the Indian market was open
     dates = macro_data["^NSEI"].dropna().loc[start_date:].index
     port_vals = []
     
@@ -174,9 +175,9 @@ try:
         port_returns_pct = ((val / invested) - 1) * 100 if invested > 0 else 0
         port_vals.append(port_returns_pct)
         
-    # 3. FIX: Safely slice the data forward, then grab the baseline values
-    nifty_series = macro_data["^NSEI"].dropna().loc[start_date:]
-    ndx_series = macro_data["^NDX"].dropna().loc[start_date:]
+    # 3. FIX: Reindex both series to the master 'dates' timeline and fill holiday gaps to align lengths perfectly
+    nifty_series = macro_data["^NSEI"].loc[start_date:].reindex(dates).ffill().bfill()
+    ndx_series = macro_data["^NDX"].loc[start_date:].reindex(dates).ffill().bfill()
     
     nifty_base = nifty_series.iloc[0] if not nifty_series.empty else 1
     ndx_base = ndx_series.iloc[0] if not ndx_series.empty else 1
@@ -187,7 +188,7 @@ try:
         "Nifty 50 (India %)": ((nifty_series / nifty_base) - 1) * 100,
         "NASDAQ 100 (US %)": ((ndx_series / ndx_base) - 1) * 100,
         "Tax-Adjusted Hurdle Line (9.54%)": (((1 + TAX_ADJUSTED_TARGET)**((dates - start_date).days/365)) - 1) * 100
-    })
+    }, index=dates)
     
     fig = px.line(perf, x="Date", y=["My Strategy Portfolio (%)", "Nifty 50 (India %)", "NASDAQ 100 (US %)", "Tax-Adjusted Hurdle Line (9.54%)"])
     fig.update_traces(line=dict(dash='dash', color='red'), selector=dict(name="Tax-Adjusted Hurdle Line (9.54%)"))
