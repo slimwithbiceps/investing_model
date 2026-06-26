@@ -12,7 +12,7 @@ LOAN_APR = 0.0763  # 7.63% Indian Bank APR
 TAX_RATE = 0.20
 TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% Gross Target
 FORTNIGHTLY_SIP = 20000 
-PER_STOCK_SIP = 10000  # Updated to 10k per stock
+PER_STOCK_SIP = 10000  
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv" 
 
 # GLOBAL UNIVERSE (India Top 75 + US Top 25)
@@ -36,6 +36,42 @@ US_STOCKS = [
 ]
 UNIVERSE = INDIAN_STOCKS + US_STOCKS
 
+# --- SUPER-ROBUST HARDCODED SECTOR MAPPING ---
+# Bypasses API rate-limiting completely to guarantee 100% fill rate.
+SECTOR_MAP = {
+    "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology", "AMZN": "Consumer Cyclical", 
+    "META": "Communication Services", "GOOGL": "Communication Services", "TSLA": "Consumer Cyclical", 
+    "AVGO": "Technology", "COST": "Consumer Defensive", "PEP": "Consumer Defensive", "ADBE": "Technology", 
+    "CSCO": "Technology", "NFLX": "Communication Services", "AMD": "Technology", "TMUS": "Communication Services", 
+    "INTC": "Technology", "TXN": "Technology", "QCOM": "Technology", "INTU": "Technology", "AMAT": "Technology", 
+    "HON": "Industrials", "ISRG": "Healthcare", "SBUX": "Consumer Cyclical", "BKNG": "Consumer Cyclical", 
+    "MDLZ": "Consumer Defensive",
+    "RELIANCE.NS": "Energy", "TCS.NS": "Technology", "HDFCBANK.NS": "Financial Services", 
+    "ICICIBANK.NS": "Financial Services", "INFY.NS": "Technology", "BHARTIARTL.NS": "Communication Services", 
+    "SBIN.NS": "Financial Services", "LICI.NS": "Financial Services", "ITC.NS": "Consumer Defensive", 
+    "HUL.NS": "Consumer Defensive", "LTIM.NS": "Technology", "BAJFINANCE.NS": "Financial Services", 
+    "MARUTI.NS": "Consumer Cyclical", "SUNPHARMA.NS": "Healthcare", "ADANIENT.NS": "Industrials", 
+    "ADANIPORTS.NS": "Industrials", "KOTAKBANK.NS": "Financial Services", "TITAN.NS": "Consumer Cyclical", 
+    "AXISBANK.NS": "Financial Services", "ASIANPAINT.NS": "Basic Materials", "ULTRACEMCO.NS": "Basic Materials", 
+    "NTPC.NS": "Utilities", "TATAMOTORS.NS": "Consumer Cyclical", "M&M.NS": "Consumer Cyclical", 
+    "ONGC.NS": "Energy", "POWERGRID.NS": "Utilities", "JSWSTEEL.NS": "Basic Materials", 
+    "TATASTEEL.NS": "Basic Materials", "COALINDIA.NS": "Energy", "ADANIPOWER.NS": "Utilities", 
+    "TRENT.NS": "Consumer Cyclical", "HAL.NS": "Industrials", "BEL.NS": "Industrials", "ZOMATO.NS": "Consumer Cyclical", 
+    "VBL.NS": "Consumer Defensive", "DLF.NS": "Real Estate", "SIEMENS.NS": "Industrials", "GRASIM.NS": "Basic Materials", 
+    "HINDALCO.NS": "Basic Materials", "NESTLEIND.NS": "Consumer Defensive", "SBILIFE.NS": "Financial Services", 
+    "BAJAJ-AUTO.NS": "Consumer Cyclical", "WIPRO.NS": "Technology", "TECHM.NS": "Technology", 
+    "EICHERMOT.NS": "Consumer Cyclical", "INDUSINDBK.NS": "Financial Services", "DIVISLAB.NS": "Healthcare", 
+    "BPCL.NS": "Energy", "CIPLA.NS": "Healthcare", "HCLTECH.NS": "Technology", "GAIL.NS": "Energy", 
+    "PNB.NS": "Financial Services", "IRFC.NS": "Financial Services", "RECLTD.NS": "Financial Services", 
+    "PFC.NS": "Financial Services", "IOC.NS": "Energy", "TATAELXSI.NS": "Technology", "POLYCAB.NS": "Industrials", 
+    "CANBK.NS": "Financial Services", "CHOLAFIN.NS": "Financial Services", "SHREECEM.NS": "Basic Materials", 
+    "BAJAJHLDNG.NS": "Financial Services", "LODHA.NS": "Real Estate", "TATACOMM.NS": "Communication Services", 
+    "JINDALSTEL.NS": "Basic Materials", "AMBUJACEM.NS": "Basic Materials", "ABB.NS": "Industrials", 
+    "HAVELLS.NS": "Industrials", "PIDILITIND.NS": "Basic Materials", "TATACONSUM.NS": "Consumer Defensive", 
+    "BRITANNIA.NS": "Consumer Defensive", "APOLLOHOSP.NS": "Healthcare", "GODREJCP.NS": "Consumer Defensive", 
+    "MAZDOCK.NS": "Industrials", "RVNL.NS": "Industrials", "IRCTC.NS": "Industrials"
+}
+
 # --- 2. DATA ENGINES & SAFETY FILTERS ---
 def get_safe_last(series, fallback=0.0):
     return float(series.iloc[-1]) if not series.empty else fallback
@@ -48,14 +84,11 @@ def fetch_macro_and_markets():
     pe_data = {}
     for t in UNIVERSE:
         try:
-            info = yf.Ticker(t).info
-            pe_val = info.get('trailingPE', np.nan) # Forced NaN to prevent Streamlit rendering crashes
-            pe_data[t] = {
-                'pe': float(pe_val) if pd.notna(pe_val) else np.nan,
-                'sector': info.get('sector', 'Unknown')
-            }
+            # We ONLY request PE ratio from API, Sector comes instantly from our hardcoded map above
+            pe_val = yf.Ticker(t).info.get('trailingPE', np.nan) 
+            pe_data[t] = float(pe_val) if pd.notna(pe_val) else np.nan
         except:
-            pe_data[t] = {'pe': np.nan, 'sector': 'Unknown'}
+            pe_data[t] = np.nan
     return macro, stocks, pe_data
 
 def analyze_markets(macro, stock_data_raw, pe_map):
@@ -98,14 +131,14 @@ def analyze_markets(macro, stock_data_raw, pe_map):
             raw_list.append({
                 "Ticker_Full": t,
                 "Ticker": t.replace(".NS",""),
-                "Region": "US" if is_us else "India",
-                "Sector": pe_map.get(t, {}).get('sector', 'Unknown'),
+                "Country": "US" if is_us else "India",
+                "Sector": SECTOR_MAP.get(t, "Unknown"),
                 "Momentum": float(get_safe_last(m_6m[t].dropna()) * 100), 
                 "Efficiency": float(get_safe_last(efficiency[t].dropna())),
                 "Price": current_price,
                 "High_52w": high_52w,
                 "Low_52w": low_52w,
-                "PE Ratio": pe_map.get(t, {}).get('pe', np.nan),
+                "PE Ratio": pe_map.get(t, np.nan),
                 "Benchmark_Ret": (ndx_ret if is_us else n_ret) * 100
             })
         except: continue
@@ -119,7 +152,7 @@ def analyze_markets(macro, stock_data_raw, pe_map):
     for _, row in temp_df.iterrows():
         sec_pe = sector_pe_map.get(row['Sector'], np.nan)
         
-        # Calculate 52-Week Price Percentile (0% = at 52w low, 100% = at 52w high)
+        # Calculate 52-Week Price Percentile
         if row['High_52w'] != row['Low_52w']:
             pct_52w = float(((row['Price'] - row['Low_52w']) / (row['High_52w'] - row['Low_52w'])) * 100)
         else:
@@ -143,7 +176,7 @@ def analyze_markets(macro, stock_data_raw, pe_map):
             
         results.append({
             "Ticker": row['Ticker'],
-            "Region": row['Region'],
+            "Country": row['Country'],
             "Sector": row['Sector'],
             "Verdict": verdict,
             "Momentum": row['Momentum'],
@@ -280,8 +313,9 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
             
         audit['Action'] = audit.apply(audit_action, axis=1)
         
+        # Added 'Country' to Audit table display
         display_cols = [
-            'Ticker', 'Region', 'Action', 'Verdict', 'Return (%)', 
+            'Ticker', 'Country', 'Action', 'Verdict', 'Return (%)', 
             'Holding Amount (₹)', 'Momentum', 'Efficiency', 'PE Ratio'
         ]
         
@@ -313,21 +347,22 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
     
     st.subheader("High-Conviction Global Selections")
     
-    # 🚨 Updated to exact top 2 stocks
+    # 2 Stocks only as requested
     elites = analysis_df[analysis_df['Verdict'] == "💎 ELITE"].head(2) 
     cols = st.columns(2)
     
     if elites.empty:
-        st.info("ℹ️ No stocks perfectly met the strict 4-Point Strategy criteria today (Often caused by YFinance data drops). Look at Stable options below.")
+        st.info("ℹ️ No stocks perfectly met the strict 4-Point Strategy criteria today. Look at Stable options below.")
     else:
         for i, (idx, row) in enumerate(elites.iterrows()):
-            cols[i].metric(f"{row['Ticker']} ({row['Region']})", f"₹{PER_STOCK_SIP:,}", f"Sector P/E Edge: {row['PE Ratio']:.1f} vs {row['Sector PE']:.1f}")
+            # Included Country in the top metric display
+            cols[i].metric(f"{row['Ticker']} ({row['Country']})", f"₹{PER_STOCK_SIP:,}", f"Sector P/E Edge: {row['PE Ratio']:.1f} vs {row['Sector PE']:.1f}")
     
     st.subheader("Complete Multi-Factor Deployment Matrix")
     
-    deploy_df = analysis_df[['Ticker', 'Sector', 'Verdict', 'Momentum', 'Efficiency', 'PE Ratio', 'Sector PE', 'Current Price', 'Stop-Loss Level', '52W Percentile']].copy()
+    # Included Country in the matrix
+    deploy_df = analysis_df[['Ticker', 'Country', 'Sector', 'Verdict', 'Momentum', 'Efficiency', 'PE Ratio', 'Sector PE', 'Current Price', 'Stop-Loss Level', '52W Percentile']].copy()
     
-    # Custom Styler strictly for text color (leaves underlying data as pure floats for Streamlit's progress bars)
     def style_deployment_matrix(row):
         styles = [''] * len(row)
         if pd.notna(row['PE Ratio']) and pd.notna(row['Sector PE']) and (row['PE Ratio'] < row['Sector PE']):
@@ -337,7 +372,6 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
 
     styled_deploy = deploy_df.style.apply(style_deployment_matrix, axis=1)
     
-    # Using Streamlit's Native Column Configs for correct bar rendering
     st.dataframe(
         styled_deploy,
         use_container_width=True,
