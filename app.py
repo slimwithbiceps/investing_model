@@ -37,7 +37,6 @@ US_STOCKS = [
 UNIVERSE = INDIAN_STOCKS + US_STOCKS
 
 # --- SUPER-ROBUST HARDCODED SECTOR MAPPING ---
-# Bypasses API rate-limiting completely to guarantee 100% fill rate.
 SECTOR_MAP = {
     "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology", "AMZN": "Consumer Cyclical", 
     "META": "Communication Services", "GOOGL": "Communication Services", "TSLA": "Consumer Cyclical", 
@@ -76,7 +75,8 @@ SECTOR_MAP = {
 def get_safe_last(series, fallback=0.0):
     return float(series.iloc[-1]) if not series.empty else fallback
 
-@st.cache_data(ttl=86400)
+# Reduced cache TTL to 1 hour (3600s) to escape API rate-limit traps faster
+@st.cache_data(ttl=3600)
 def fetch_macro_and_markets():
     macro = yf.download(["^NSEI", "^NDX", "^INDIAVIX", "INR=X"], period="1y", interval="1d")['Close']
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
@@ -84,11 +84,20 @@ def fetch_macro_and_markets():
     pe_data = {}
     for t in UNIVERSE:
         try:
-            # We ONLY request PE ratio from API, Sector comes instantly from our hardcoded map above
-            pe_val = yf.Ticker(t).info.get('trailingPE', np.nan) 
-            pe_data[t] = float(pe_val) if pd.notna(pe_val) else np.nan
+            info = yf.Ticker(t).info
+            
+            # --- THE DOUBLE-NET PE FALLBACK ---
+            # Try trailing 12-month PE first
+            pe_val = info.get('trailingPE')
+            
+            # If Yahoo returns blank (common for Adani Power etc.), try forward projected PE
+            if pe_val is None or pd.isna(pe_val):
+                pe_val = info.get('forwardPE')
+                
+            pe_data[t] = float(pe_val) if pe_val is not None else np.nan
         except:
             pe_data[t] = np.nan
+            
     return macro, stocks, pe_data
 
 def analyze_markets(macro, stock_data_raw, pe_map):
@@ -164,6 +173,8 @@ def analyze_markets(macro, stock_data_raw, pe_map):
         score = 0
         if row['Momentum'] > row['Benchmark_Ret']: score += 1
         if row['Efficiency'] > 0.8: score += 1
+        
+        # Only award the PE point if the data actually exists
         if pd.notna(row['PE Ratio']) and pd.notna(sec_pe) and (row['PE Ratio'] < sec_pe): score += 1
         if 40 <= pct_52w <= 96: score += 1
         
@@ -313,7 +324,6 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
             
         audit['Action'] = audit.apply(audit_action, axis=1)
         
-        # Added 'Country' to Audit table display
         display_cols = [
             'Ticker', 'Country', 'Action', 'Verdict', 'Return (%)', 
             'Holding Amount (₹)', 'Momentum', 'Efficiency', 'PE Ratio'
@@ -347,7 +357,6 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
     
     st.subheader("High-Conviction Global Selections")
     
-    # 2 Stocks only as requested
     elites = analysis_df[analysis_df['Verdict'] == "💎 ELITE"].head(2) 
     cols = st.columns(2)
     
@@ -355,12 +364,10 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
         st.info("ℹ️ No stocks perfectly met the strict 4-Point Strategy criteria today. Look at Stable options below.")
     else:
         for i, (idx, row) in enumerate(elites.iterrows()):
-            # Included Country in the top metric display
             cols[i].metric(f"{row['Ticker']} ({row['Country']})", f"₹{PER_STOCK_SIP:,}", f"Sector P/E Edge: {row['PE Ratio']:.1f} vs {row['Sector PE']:.1f}")
     
     st.subheader("Complete Multi-Factor Deployment Matrix")
     
-    # Included Country in the matrix
     deploy_df = analysis_df[['Ticker', 'Country', 'Sector', 'Verdict', 'Momentum', 'Efficiency', 'PE Ratio', 'Sector PE', 'Current Price', 'Stop-Loss Level', '52W Percentile']].copy()
     
     def style_deployment_matrix(row):
