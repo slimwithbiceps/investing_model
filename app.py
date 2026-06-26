@@ -4,6 +4,8 @@ import yfinance as yf
 import numpy as np
 import plotly.express as px
 from datetime import datetime
+import time
+from yahooquery import Ticker 
 
 # --- 1. SETTINGS & LOAN CONSTANTS ---
 st.set_page_config(page_title="EMI-Shield Global Cockpit", layout="wide")
@@ -14,6 +16,13 @@ TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% Gross Target
 FORTNIGHTLY_SIP = 20000 
 PER_STOCK_SIP = 10000  
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv" 
+
+# --- MANUAL CACHE OVERRIDE ---
+with st.sidebar:
+    st.write("🔧 Developer Tools")
+    if st.button("🔄 Force Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
 # GLOBAL UNIVERSE (India Top 75 + US Top 25)
 INDIAN_STOCKS = [
@@ -71,39 +80,47 @@ SECTOR_MAP = {
     "MAZDOCK.NS": "Industrials", "RVNL.NS": "Industrials", "IRCTC.NS": "Industrials"
 }
 
-# --- MANUAL CACHE OVERRIDE ---
-with st.sidebar:
-    st.write("🔧 Developer Tools")
-    if st.button("🔄 Force Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
 # --- 2. DATA ENGINES & SAFETY FILTERS ---
 def get_safe_last(series, fallback=0.0):
     return float(series.iloc[-1]) if not series.empty else fallback
 
-# Reduced cache TTL to 1 hour (3600s) to escape API rate-limit traps faster
 @st.cache_data(ttl=3600)
 def fetch_macro_and_markets():
+    # Prices are universally public; safe to pull via yfinance bulk download
     macro = yf.download(["^NSEI", "^NDX", "^INDIAVIX", "INR=X"], period="1y", interval="1d")['Close']
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
     
     pe_data = {}
-    for t in UNIVERSE:
+    chunk_size = 15 # The magic number to avoid triggering Yahoo's bot-defense
+    
+    # PERMANENT FIX: The Chunking Engine
+    for i in range(0, len(UNIVERSE), chunk_size):
+        chunk = UNIVERSE[i:i + chunk_size]
         try:
-            info = yf.Ticker(t).info
+            yq_tickers = Ticker(chunk)
+            summary = yq_tickers.summary_detail
             
-            # --- THE DOUBLE-NET PE FALLBACK ---
-            # Try trailing 12-month PE first
-            pe_val = info.get('trailingPE')
-            
-            # If Yahoo returns blank (common for Adani Power etc.), try forward projected PE
-            if pe_val is None or pd.isna(pe_val):
-                pe_val = info.get('forwardPE')
+            if isinstance(summary, dict):
+                for t in chunk:
+                    pe_val = np.nan
+                    t_data = summary.get(t)
+                    
+                    # Ensure Yahoo didn't return an error string for this specific ticker
+                    if isinstance(t_data, dict):
+                        pe_val = t_data.get('trailingPE')
+                        # Double-net fallback for companies missing trailing EPS
+                        if pe_val is None or pd.isna(pe_val):
+                            pe_val = t_data.get('forwardPE')
+                            
+                    pe_data[t] = float(pe_val) if pe_val is not None else np.nan
+            else:
+                for t in chunk: pe_data[t] = np.nan
                 
-            pe_data[t] = float(pe_val) if pe_val is not None else np.nan
-        except:
-            pe_data[t] = np.nan
+        except Exception as e:
+            for t in chunk: pe_data[t] = np.nan
+            
+        # The critical 1-second pause to act like a human browser
+        time.sleep(1)
             
     return macro, stocks, pe_data
 
@@ -161,14 +178,12 @@ def analyze_markets(macro, stock_data_raw, pe_map):
         
     temp_df = pd.DataFrame(raw_list)
     
-    # Calculate Sector PE Medians dynamically
     sector_pe_map = temp_df.groupby('Sector')['PE Ratio'].median().to_dict()
 
     results = []
     for _, row in temp_df.iterrows():
         sec_pe = sector_pe_map.get(row['Sector'], np.nan)
         
-        # Calculate 52-Week Price Percentile
         if row['High_52w'] != row['Low_52w']:
             pct_52w = float(((row['Price'] - row['Low_52w']) / (row['High_52w'] - row['Low_52w'])) * 100)
         else:
@@ -180,17 +195,12 @@ def analyze_markets(macro, stock_data_raw, pe_map):
         score = 0
         if row['Momentum'] > row['Benchmark_Ret']: score += 1
         if row['Efficiency'] > 0.8: score += 1
-        
-        # Only award the PE point if the data actually exists
         if pd.notna(row['PE Ratio']) and pd.notna(sec_pe) and (row['PE Ratio'] < sec_pe): score += 1
         if 40 <= pct_52w <= 96: score += 1
         
-        if score == 4:
-            verdict = "💎 ELITE"
-        elif score >= 2:
-            verdict = "✅ STABLE"
-        else:
-            verdict = "🛑 WEAK"
+        if score == 4: verdict = "💎 ELITE"
+        elif score >= 2: verdict = "✅ STABLE"
+        else: verdict = "🛑 WEAK"
             
         results.append({
             "Ticker": row['Ticker'],
