@@ -45,14 +45,17 @@ def fetch_macro_and_markets():
     macro = yf.download(["^NSEI", "^NDX", "^INDIAVIX", "INR=X"], period="1y", interval="1d")['Close']
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
     
-    # Cache structural PE details to keep deployment execution immediate
     pe_data = {}
     for t in UNIVERSE:
         try:
-            val = yf.Ticker(t).info.get('trailingPE', None)
-            pe_data[t] = float(val) if val else np.nan
+            info = yf.Ticker(t).info
+            pe_val = info.get('trailingPE', None)
+            pe_data[t] = {
+                'pe': float(pe_val) if pe_val else np.nan,
+                'sector': info.get('sector', 'Unknown')
+            }
         except:
-            pe_data[t] = np.nan
+            pe_data[t] = {'pe': np.nan, 'sector': 'Unknown'}
     return macro, stocks, pe_data
 
 def analyze_markets(macro, stock_data_raw, pe_map):
@@ -82,7 +85,6 @@ def analyze_markets(macro, stock_data_raw, pe_map):
     n_ret = (c_nifty / get_safe_last(nifty.shift(126), c_nifty)) - 1
     ndx_ret = (get_safe_last(ndx) / get_safe_last(ndx.shift(126), get_safe_last(ndx))) - 1
     
-    # Step 1: Gather raw metrics across the board
     raw_list = []
     for t in UNIVERSE:
         try:
@@ -91,44 +93,50 @@ def analyze_markets(macro, stock_data_raw, pe_map):
             if current_price == 0.0: continue
             
             high_52w = stocks[t].max()
+            low_52w = stocks[t].min()
+            
             raw_list.append({
                 "Ticker_Full": t,
                 "Ticker": t.replace(".NS",""),
                 "Region": "US" if is_us else "India",
-                "Momentum": get_safe_last(m_6m[t].dropna()),
+                "Sector": pe_map.get(t, {}).get('sector', 'Unknown'),
+                "Momentum": get_safe_last(m_6m[t].dropna()) * 100, # Converted to % for Styler display
                 "Efficiency": get_safe_last(efficiency[t].dropna()),
                 "Price": current_price,
                 "High_52w": high_52w,
-                "PE": pe_map.get(t, np.nan),
-                "Benchmark_Ret": ndx_ret if is_us else n_ret
+                "Low_52w": low_52w,
+                "PE Ratio": pe_map.get(t, {}).get('pe', np.nan),
+                "Benchmark_Ret": (ndx_ret if is_us else n_ret) * 100
             })
         except: continue
         
     temp_df = pd.DataFrame(raw_list)
     
-    # Calculate operational tracking limits relative to current regional peers
-    india_pe_median = temp_df[temp_df['Region'] == 'India']['PE'].median()
-    us_pe_median = temp_df[temp_df['Region'] == 'US']['PE'].median()
-    
-    # Fallback bounds if broad scraping limits are encountered
-    if pd.isna(india_pe_median): india_pe_median = 26.5
-    if pd.isna(us_pe_median): us_pe_median = 33.0
+    # Calculate Sector PE Medians dynamically
+    sector_pe_map = temp_df.groupby('Sector')['PE Ratio'].median().to_dict()
 
-    # Step 2: Map structural alpha classification criteria
     results = []
     for _, row in temp_df.iterrows():
-        med_pe = us_pe_median if row['Region'] == 'US' else india_pe_median
+        sec_pe = sector_pe_map.get(row['Sector'], np.nan)
         
-        # Criteria Calculations
-        is_rallying = (row['Momentum'] > row['Benchmark_Ret']) and (row['Momentum'] > 0)
-        not_at_peak = row['Price'] < (row['High_52w'] * 0.96)  # Minimum 4% pullback headroom from absolute top
-        is_undervalued = pd.notna(row['PE']) and (row['PE'] <= med_pe)
-        
+        # Calculate 52-Week Price Percentile (0% = at 52w low, 100% = at 52w high)
+        if row['High_52w'] != row['Low_52w']:
+            pct_52w = ((row['Price'] - row['Low_52w']) / (row['High_52w'] - row['Low_52w'])) * 100
+        else:
+            pct_52w = 100.0
+            
         stop_loss = row['High_52w'] * 0.85
         
-        if is_rallying and not_at_peak and is_undervalued:
+        # --- MULTI-FACTOR SCORING ENGINE ---
+        score = 0
+        if row['Momentum'] > row['Benchmark_Ret']: score += 1
+        if row['Efficiency'] > 0.8: score += 1
+        if pd.notna(row['PE Ratio']) and pd.notna(sec_pe) and (row['PE Ratio'] < sec_pe): score += 1
+        if 40 <= pct_52w <= 96: score += 1
+        
+        if score == 4:
             verdict = "💎 ELITE"
-        elif row['Efficiency'] > 0.4:
+        elif score >= 2:
             verdict = "✅ STABLE"
         else:
             verdict = "🛑 WEAK"
@@ -136,13 +144,16 @@ def analyze_markets(macro, stock_data_raw, pe_map):
         results.append({
             "Ticker": row['Ticker'],
             "Region": row['Region'],
+            "Sector": row['Sector'],
             "Verdict": verdict,
             "Momentum": row['Momentum'],
             "Efficiency": row['Efficiency'],
-            "PE Ratio": row['PE'],
+            "PE Ratio": row['PE Ratio'],
+            "Sector PE": sec_pe,
+            "Current Price": row['Price'],
             "Stop-Loss Level": stop_loss,
-            "Price_Backend": row['Price'],             # Retained safely for background loops
-            "Buffer_Backend": ((row['Price'] - stop_loss) / row['Price']) * 100
+            "52W Percentile": pct_52w,
+            "Buffer_Backend": ((row['Price'] - stop_loss) / row['Price']) * 100 # Hidden backend calc
         })
         
     df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
@@ -199,10 +210,8 @@ try:
         for _, row in active.iterrows():
             ticker = row['Ticker']
             t_mapped = f"{ticker}.NS" if ticker in [t.replace(".NS","") for t in INDIAN_STOCKS] else ticker
-            try: 
-                val += row['Qty'] * float(stock_data_clean.loc[d, t_mapped])
-            except: 
-                val += row['Total_Value']
+            try: val += row['Qty'] * float(stock_data_clean.loc[d, t_mapped])
+            except: val += row['Total_Value']
             
         invested = active['Total_Value'].sum()
         port_returns_pct = ((val / invested) - 1) * 100 if invested > 0 else 0
@@ -250,7 +259,7 @@ try:
     st.plotly_chart(fig, use_container_width=True)
     
 except Exception as e:
-    st.info(f"💡 Waiting for complete ledger data to overlay custom performance plots. Details: {e}")
+    st.info("💡 Waiting for complete ledger data to overlay custom performance plots.")
 
 # --- THE AUDIT & STOP-LOSS ENGINE ---
 st.divider()
@@ -260,8 +269,8 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
         ledger = pd.read_csv(SHEET_URL)
         audit = ledger.merge(analysis_df, on="Ticker", how="left")
         
-        audit['Holding Amount (₹)'] = audit['Qty'] * audit['Price_Backend']
-        audit['Return (%)'] = ((audit['Price_Backend'] - audit['BuyPrice']) / audit['BuyPrice']) * 100
+        audit['Holding Amount (₹)'] = audit['Qty'] * audit['Current Price']
+        audit['Return (%)'] = ((audit['Current Price'] - audit['BuyPrice']) / audit['BuyPrice']) * 100
         
         def audit_action(row):
             if pd.isna(row['Buffer_Backend']): return "⚠️ GAP DATA"
@@ -271,10 +280,9 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
             
         audit['Action'] = audit.apply(audit_action, axis=1)
         
-        # Display structures stripped of current pricing exposure
         display_cols = [
             'Ticker', 'Region', 'Action', 'Verdict', 'Return (%)', 
-            'Holding Amount (₹)', 'Momentum', 'Efficiency', 'PE Ratio', 'Stop-Loss Level'
+            'Holding Amount (₹)', 'Momentum', 'Efficiency', 'PE Ratio'
         ]
         
         st.dataframe(
@@ -285,8 +293,7 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
                 "Holding Amount (₹)": st.column_config.NumberColumn(format="₹%.2f"),
                 "Momentum": st.column_config.NumberColumn(format="%.2f%%"), 
                 "Efficiency": st.column_config.NumberColumn(format="%.2f"),
-                "PE Ratio": st.column_config.NumberColumn(format="%.1f"),
-                "Stop-Loss Level": st.column_config.NumberColumn(format="%.2f")
+                "PE Ratio": st.column_config.NumberColumn(format="%.1f")
             }
         )
         
@@ -295,9 +302,9 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
             unique_sells = to_sell['Ticker'].unique().tolist()
             st.error(f"Execution Recommended: Sell out of {', '.join(unique_sells)} entries.")
     except Exception as e: 
-        st.error(f"Audit processing failed. Ensure your spreadsheet labels match clean corporate tickers like 'HAL' or 'NVDA'. Error details: {e}")
+        st.error("Audit processing failed. Ensure your spreadsheet labels match clean corporate tickers.")
 
-# --- GLOBAL DEPLOYMENT CONTROLLER ---
+# --- GLOBAL DEPLOYMENT CONTROLLER (NEW STYLED MATRIX) ---
 st.divider()
 st.header(f"🎯 Fortnightly Deployment Portal: Fresh ₹{FORTNIGHTLY_SIP:,}")
 if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
@@ -309,21 +316,46 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
     cols = st.columns(3)
     
     if elites.empty:
-        st.info("ℹ️ No stocks perfectly met the strict 'Pullback + Undervalued' strategy criteria today. Hold dry powder or look at Stable options below.")
+        st.info("ℹ️ No stocks perfectly met the strict 4-Point Strategy criteria today. Hold dry powder or look at Stable options below.")
     else:
         for i, (idx, row) in enumerate(elites.iterrows()):
-            cols[i].metric(f"{row['Ticker']} ({row['Region']})", f"₹{PER_STOCK_SIP:,}", f"P/E: {row['PE Ratio']:.1f}")
+            cols[i].metric(f"{row['Ticker']} ({row['Region']})", f"₹{PER_STOCK_SIP:,}", f"Sector P/E Edge: {row['PE Ratio']:.1f} vs {row['Sector PE']:.1f}")
     
-    st.subheader("Complete Global Universe Metrics Rankings")
-    # Clean display frame removing raw execution metrics
-    rankings_display = analysis_df[['Ticker', 'Region', 'Verdict', 'Momentum', 'Efficiency', 'PE Ratio', 'Stop-Loss Level']]
+    st.subheader("Complete Multi-Factor Deployment Matrix")
     
-    st.dataframe(rankings_display, column_config={
-        "Momentum": st.column_config.NumberColumn("Momentum (6M Smoothed)", format="%.1f%%"),
-        "Efficiency": st.column_config.ProgressColumn("Efficiency (Risk-Adj)", min_value=0, max_value=2, format="%.2f"),
-        "PE Ratio": st.column_config.NumberColumn("PE Ratio", format="%.1f"),
-        "Stop-Loss Level": st.column_config.NumberColumn("Trailing Stop-Loss Floor", format="%.2f")
-    }, use_container_width=True)
+    # Select columns to display in Deployment Table
+    deploy_df = analysis_df[['Ticker', 'Sector', 'Verdict', 'Momentum', 'Efficiency', 'PE Ratio', 'Sector PE', 'Current Price', 'Stop-Loss Level', '52W Percentile']].copy()
+    
+    # Constructing the Custom Pandas Styler for Conditional Formatting
+    def style_deployment_matrix(data):
+        styles = pd.DataFrame('', index=data.index, columns=data.columns)
+        
+        # Condition: PE Ratio formatted to green if less than Sector PE
+        green_mask = (data['PE Ratio'] < data['Sector PE']) & pd.notna(data['PE Ratio']) & pd.notna(data['Sector PE'])
+        styles.loc[green_mask, 'PE Ratio'] = 'color: #00FF00; font-weight: bold;'
+        
+        return styles
+
+    # Apply Styler logic
+    styled_deploy = deploy_df.style.apply(style_deployment_matrix, axis=None)
+    
+    # Add Visual Bar Formatting
+    styled_deploy = styled_deploy.bar(subset=['Momentum'], align='mid', color=['#d65f5f', '#5fba7d'])
+    styled_deploy = styled_deploy.bar(subset=['Efficiency'], align='left', color='#5fba7d', vmin=0, vmax=3)
+    styled_deploy = styled_deploy.bar(subset=['52W Percentile'], align='left', color='#5bc0de', vmin=0, vmax=100)
+    
+    # Clean Number Formats
+    styled_deploy = styled_deploy.format({
+        'Momentum': "{:.2f}%",
+        'Efficiency': "{:.2f}",
+        'PE Ratio': "{:.1f}",
+        'Sector PE': "{:.1f}",
+        'Current Price': "{:.2f}",
+        'Stop-Loss Level': "{:.2f}",
+        '52W Percentile': "{:.1f}%"
+    }, na_rep="N/A")
+
+    st.dataframe(styled_deploy, use_container_width=True, height=600)
 
 # --- LAYMAN'S FINANCE EXPANDED DICTIONARY ---
 st.divider()
@@ -335,14 +367,16 @@ with col_g1:
         st.write("**Annualized Returns (CAGR):** The speed of your money. If your portfolio continued growing at this exact same speed for a full 365 days, this is what the final percentage would be.")
     with st.expander("📈 XIRR (Extended Internal Rate of Return)"):
         st.write("**Full Form:** Extended Internal Rate of Return.")
-        st.write("**Plain English:** Your personal investment speedometer. Regular returns assume you put in all your money on day one. Because you drop in ₹20,000 blocks sequentially every fortnight, XIRR dynamically tracks how hard every individual rupee is working based on its specific entry date.")
+        st.write("**Plain English:** Your personal investment speedometer.")
     with st.expander("🚄 Momentum (Alpha)"):
         st.write("**Full Form:** Relative Price Momentum vs. Benchmarks.")
-        st.write("**Plain English:** Pure acceleration. We reject sluggish stocks. This tracks whether a selection is running significantly faster than the baseline market indices (^NSEI for India or ^NDX for the US tech market).")
+        st.write("**Plain English:** Pure acceleration. We reject sluggish stocks.")
 with col_g2:
     with st.expander("🎯 Efficiency (Sharpe Ratio Score)", expanded=True):
         st.write("**Full Form:** Sharpe Ratio / Risk-Adjusted Return Profiles.")
-        st.write("**Plain English:** Ride smoothness. If Stock A and Stock B both return 20%, but Stock A goes up in a calm, steady line while Stock B experiences massive, gut-wrenching daily spikes, Stock A has a much higher Efficiency Score. Because you have a locked-in ₹40,573 auto-debit obligation every month, we aggressively prioritize high-efficiency, low-volatility assets to minimize portfolio stress.")
+        st.write("**Plain English:** Ride smoothness. We aggressively prioritize high-efficiency, low-volatility assets to minimize portfolio stress.")
     with st.expander("🛡️ Trailing Stop-Loss Protection"):
         st.write("**Full Form:** Maximum Peak-to-Trough Capital Ceiling Safeguard.")
-        st.write("**Plain English:** An automated profit lock. A standard stop-loss stays fixed forever. A *trailing* stop-loss acts like an escalator: as your stock climbs to new all-time highs, your floor rises directly behind it (anchored exactly 15% below peak price values). If market trends break down, it triggers a liquidate warning to salvage your profits.")
+        st.write("**Plain English:** An automated profit lock acting like an escalator: as your stock climbs to new all-time highs, your floor rises directly behind it.")
+    with st.expander("⚖️ 52-Week Price Percentile"):
+        st.write("**Plain English:** This metric tells you exactly where a stock's current price sits within its highest and lowest points over the last year. 0% means it is at absolute rock bottom. 100% means it is at an absolute peak. The strategy looks for the 'Goldilocks Zone' (40% to 96%)—meaning the stock is rising but hasn't maxed out its rally.")
