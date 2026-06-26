@@ -82,18 +82,25 @@ SECTOR_MAP = {
 
 # --- 2. DATA ENGINES & SAFETY FILTERS ---
 def get_safe_last(series, fallback=0.0):
-    return float(series.iloc[-1]) if not series.empty else fallback
+    """A bulletproof extractor that will never crash, even on empty Yahoo data."""
+    try:
+        if series is None:
+            return float(fallback)
+        clean_series = series.dropna()
+        if len(clean_series) > 0:
+            return float(clean_series.iloc[-1])
+        return float(fallback)
+    except Exception:
+        return float(fallback)
 
 @st.cache_data(ttl=3600)
 def fetch_macro_and_markets():
-    # Prices are universally public; safe to pull via yfinance bulk download
     macro = yf.download(["^NSEI", "^NDX", "^INDIAVIX", "INR=X"], period="1y", interval="1d")['Close']
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
     
     pe_data = {}
-    chunk_size = 15 # The magic number to avoid triggering Yahoo's bot-defense
+    chunk_size = 15 
     
-    # PERMANENT FIX: The Chunking Engine
     for i in range(0, len(UNIVERSE), chunk_size):
         chunk = UNIVERSE[i:i + chunk_size]
         try:
@@ -105,10 +112,8 @@ def fetch_macro_and_markets():
                     pe_val = np.nan
                     t_data = summary.get(t)
                     
-                    # Ensure Yahoo didn't return an error string for this specific ticker
                     if isinstance(t_data, dict):
                         pe_val = t_data.get('trailingPE')
-                        # Double-net fallback for companies missing trailing EPS
                         if pe_val is None or pd.isna(pe_val):
                             pe_val = t_data.get('forwardPE')
                             
@@ -116,23 +121,24 @@ def fetch_macro_and_markets():
             else:
                 for t in chunk: pe_data[t] = np.nan
                 
-        except Exception as e:
+        except Exception:
             for t in chunk: pe_data[t] = np.nan
             
-        # The critical 1-second pause to act like a human browser
         time.sleep(1)
             
     return macro, stocks, pe_data
 
 def analyze_markets(macro, stock_data_raw, pe_map):
     stocks = stock_data_raw.ffill().bfill()
-    nifty = macro["^NSEI"].dropna()
-    ndx = macro["^NDX"].dropna()
-    vix = macro["^INDIAVIX"].dropna()
-    usd_inr = macro["INR=X"].dropna()
     
-    c_nifty = get_safe_last(nifty)
-    dma_200 = get_safe_last(nifty.rolling(200).mean(), c_nifty)
+    # Safely extract columns in case Yahoo completely drops a ticker during a glitch
+    nifty = macro.get("^NSEI", pd.Series(dtype=float)).dropna()
+    ndx = macro.get("^NDX", pd.Series(dtype=float)).dropna()
+    vix = macro.get("^INDIAVIX", pd.Series(dtype=float)).dropna()
+    usd_inr = macro.get("INR=X", pd.Series(dtype=float)).dropna()
+    
+    c_nifty = get_safe_last(nifty, 23000.0) # Hard fallbacks to prevent cascading math errors
+    dma_200 = get_safe_last(nifty.rolling(200).mean() if len(nifty) > 200 else nifty, c_nifty)
     c_vix = get_safe_last(vix, 15.0)
     c_usd = get_safe_last(usd_inr, 83.50)
     
@@ -148,14 +154,19 @@ def analyze_markets(macro, stock_data_raw, pe_map):
     vol = (stocks.pct_change().rolling(126).std() * np.sqrt(252)).rolling(14).mean()
     efficiency = m_6m / vol
     
-    n_ret = (c_nifty / get_safe_last(nifty.shift(126), c_nifty)) - 1
-    ndx_ret = (get_safe_last(ndx) / get_safe_last(ndx.shift(126), get_safe_last(ndx))) - 1
+    # --- BULLETPROOF RETURN CALCULATIONS ---
+    nifty_base = get_safe_last(nifty.shift(126), c_nifty)
+    n_ret = (c_nifty / nifty_base) - 1 if nifty_base != 0 else 0.0
+    
+    c_ndx = get_safe_last(ndx, 19000.0)
+    ndx_base = get_safe_last(ndx.shift(126), c_ndx)
+    ndx_ret = (c_ndx / ndx_base) - 1 if ndx_base != 0 else 0.0
     
     raw_list = []
     for t in UNIVERSE:
         try:
             is_us = t in US_STOCKS
-            current_price = get_safe_last(stocks[t].dropna())
+            current_price = get_safe_last(stocks.get(t, pd.Series(dtype=float)))
             if current_price == 0.0: continue
             
             high_52w = stocks[t].max()
@@ -166,35 +177,35 @@ def analyze_markets(macro, stock_data_raw, pe_map):
                 "Ticker": t.replace(".NS",""),
                 "Country": "US" if is_us else "India",
                 "Sector": SECTOR_MAP.get(t, "Unknown"),
-                "Momentum": float(get_safe_last(m_6m[t].dropna()) * 100), 
-                "Efficiency": float(get_safe_last(efficiency[t].dropna())),
+                "Momentum": float(get_safe_last(m_6m.get(t, pd.Series(dtype=float))) * 100), 
+                "Efficiency": float(get_safe_last(efficiency.get(t, pd.Series(dtype=float)))),
                 "Price": current_price,
                 "High_52w": high_52w,
                 "Low_52w": low_52w,
                 "PE Ratio": pe_map.get(t, np.nan),
                 "Benchmark_Ret": (ndx_ret if is_us else n_ret) * 100
             })
-        except: continue
+        except Exception: 
+            continue
         
     temp_df = pd.DataFrame(raw_list)
-    
     sector_pe_map = temp_df.groupby('Sector')['PE Ratio'].median().to_dict()
 
     results = []
     for _, row in temp_df.iterrows():
         sec_pe = sector_pe_map.get(row['Sector'], np.nan)
         
-        if row['High_52w'] != row['Low_52w']:
+        if pd.notna(row['High_52w']) and pd.notna(row['Low_52w']) and row['High_52w'] != row['Low_52w']:
             pct_52w = float(((row['Price'] - row['Low_52w']) / (row['High_52w'] - row['Low_52w'])) * 100)
         else:
             pct_52w = 100.0
             
-        stop_loss = float(row['High_52w'] * 0.85)
+        stop_loss = float(row['High_52w'] * 0.85) if pd.notna(row['High_52w']) else 0.0
         
         # --- MULTI-FACTOR SCORING ENGINE ---
         score = 0
         if row['Momentum'] > row['Benchmark_Ret']: score += 1
-        if row['Efficiency'] > 0.8: score += 1
+        if pd.notna(row['Efficiency']) and row['Efficiency'] > 0.8: score += 1
         if pd.notna(row['PE Ratio']) and pd.notna(sec_pe) and (row['PE Ratio'] < sec_pe): score += 1
         if 40 <= pct_52w <= 96: score += 1
         
@@ -214,11 +225,16 @@ def analyze_markets(macro, stock_data_raw, pe_map):
             "Current Price": row['Price'],
             "Stop-Loss Level": stop_loss,
             "52W Percentile": pct_52w,
-            "Buffer_Backend": ((row['Price'] - stop_loss) / row['Price']) * 100 
+            "Buffer_Backend": ((row['Price'] - stop_loss) / row['Price']) * 100 if row['Price'] > 0 else 0.0
         })
         
-    df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
-    df.index += 1  
+    if results:
+        df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
+        df.index += 1  
+    else:
+        # Fallback if everything fails so the UI doesn't break
+        df = pd.DataFrame(columns=["Ticker", "Country", "Sector", "Verdict", "Momentum", "Efficiency", "PE Ratio", "Sector PE", "Current Price", "Stop-Loss Level", "52W Percentile", "Buffer_Backend"])
+        
     return df, macro_status
 
 # --- 3. UI LAYOUT ---
