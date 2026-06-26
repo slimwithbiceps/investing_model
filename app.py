@@ -71,6 +71,13 @@ SECTOR_MAP = {
     "MAZDOCK.NS": "Industrials", "RVNL.NS": "Industrials", "IRCTC.NS": "Industrials"
 }
 
+# --- MANUAL CACHE OVERRIDE ---
+with st.sidebar:
+    st.write("🔧 Developer Tools")
+    if st.button("🔄 Force Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
 # --- 2. DATA ENGINES & SAFETY FILTERS ---
 def get_safe_last(series, fallback=0.0):
     return float(series.iloc[-1]) if not series.empty else fallback
