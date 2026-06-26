@@ -12,7 +12,7 @@ LOAN_APR = 0.0763  # 7.63% Indian Bank APR
 TAX_RATE = 0.20
 TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% Gross Target
 FORTNIGHTLY_SIP = 20000 
-PER_STOCK_SIP = 6667 
+PER_STOCK_SIP = 10000  # Updated to 10k per stock
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv" 
 
 # GLOBAL UNIVERSE (India Top 75 + US Top 25)
@@ -49,9 +49,9 @@ def fetch_macro_and_markets():
     for t in UNIVERSE:
         try:
             info = yf.Ticker(t).info
-            pe_val = info.get('trailingPE', None)
+            pe_val = info.get('trailingPE', np.nan) # Forced NaN to prevent Streamlit rendering crashes
             pe_data[t] = {
-                'pe': float(pe_val) if pe_val else np.nan,
+                'pe': float(pe_val) if pd.notna(pe_val) else np.nan,
                 'sector': info.get('sector', 'Unknown')
             }
         except:
@@ -100,8 +100,8 @@ def analyze_markets(macro, stock_data_raw, pe_map):
                 "Ticker": t.replace(".NS",""),
                 "Region": "US" if is_us else "India",
                 "Sector": pe_map.get(t, {}).get('sector', 'Unknown'),
-                "Momentum": get_safe_last(m_6m[t].dropna()) * 100, # Converted to % for Styler display
-                "Efficiency": get_safe_last(efficiency[t].dropna()),
+                "Momentum": float(get_safe_last(m_6m[t].dropna()) * 100), 
+                "Efficiency": float(get_safe_last(efficiency[t].dropna())),
                 "Price": current_price,
                 "High_52w": high_52w,
                 "Low_52w": low_52w,
@@ -121,11 +121,11 @@ def analyze_markets(macro, stock_data_raw, pe_map):
         
         # Calculate 52-Week Price Percentile (0% = at 52w low, 100% = at 52w high)
         if row['High_52w'] != row['Low_52w']:
-            pct_52w = ((row['Price'] - row['Low_52w']) / (row['High_52w'] - row['Low_52w'])) * 100
+            pct_52w = float(((row['Price'] - row['Low_52w']) / (row['High_52w'] - row['Low_52w'])) * 100)
         else:
             pct_52w = 100.0
             
-        stop_loss = row['High_52w'] * 0.85
+        stop_loss = float(row['High_52w'] * 0.85)
         
         # --- MULTI-FACTOR SCORING ENGINE ---
         score = 0
@@ -153,7 +153,7 @@ def analyze_markets(macro, stock_data_raw, pe_map):
             "Current Price": row['Price'],
             "Stop-Loss Level": stop_loss,
             "52W Percentile": pct_52w,
-            "Buffer_Backend": ((row['Price'] - stop_loss) / row['Price']) * 100 # Hidden backend calc
+            "Buffer_Backend": ((row['Price'] - stop_loss) / row['Price']) * 100 
         })
         
     df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
@@ -312,50 +312,64 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
         st.warning("⚠️ Macro Indicators have breached threshold boundaries. Capital preservation protocol active: hold cash reserves.")
     
     st.subheader("High-Conviction Global Selections")
-    elites = analysis_df[analysis_df['Verdict'] == "💎 ELITE"].head(3)
-    cols = st.columns(3)
+    
+    # 🚨 Updated to exact top 2 stocks
+    elites = analysis_df[analysis_df['Verdict'] == "💎 ELITE"].head(2) 
+    cols = st.columns(2)
     
     if elites.empty:
-        st.info("ℹ️ No stocks perfectly met the strict 4-Point Strategy criteria today. Hold dry powder or look at Stable options below.")
+        st.info("ℹ️ No stocks perfectly met the strict 4-Point Strategy criteria today (Often caused by YFinance data drops). Look at Stable options below.")
     else:
         for i, (idx, row) in enumerate(elites.iterrows()):
             cols[i].metric(f"{row['Ticker']} ({row['Region']})", f"₹{PER_STOCK_SIP:,}", f"Sector P/E Edge: {row['PE Ratio']:.1f} vs {row['Sector PE']:.1f}")
     
     st.subheader("Complete Multi-Factor Deployment Matrix")
     
-    # Select columns to display in Deployment Table
     deploy_df = analysis_df[['Ticker', 'Sector', 'Verdict', 'Momentum', 'Efficiency', 'PE Ratio', 'Sector PE', 'Current Price', 'Stop-Loss Level', '52W Percentile']].copy()
     
-    # Constructing the Custom Pandas Styler for Conditional Formatting
-    def style_deployment_matrix(data):
-        styles = pd.DataFrame('', index=data.index, columns=data.columns)
-        
-        # Condition: PE Ratio formatted to green if less than Sector PE
-        green_mask = (data['PE Ratio'] < data['Sector PE']) & pd.notna(data['PE Ratio']) & pd.notna(data['Sector PE'])
-        styles.loc[green_mask, 'PE Ratio'] = 'color: #00FF00; font-weight: bold;'
-        
+    # Custom Styler strictly for text color (leaves underlying data as pure floats for Streamlit's progress bars)
+    def style_deployment_matrix(row):
+        styles = [''] * len(row)
+        if pd.notna(row['PE Ratio']) and pd.notna(row['Sector PE']) and (row['PE Ratio'] < row['Sector PE']):
+            idx = row.index.get_loc('PE Ratio')
+            styles[idx] = 'color: #00FF00; font-weight: bold;'
         return styles
 
-    # Apply Styler logic
-    styled_deploy = deploy_df.style.apply(style_deployment_matrix, axis=None)
+    styled_deploy = deploy_df.style.apply(style_deployment_matrix, axis=1)
     
-    # Add Visual Bar Formatting
-    styled_deploy = styled_deploy.bar(subset=['Momentum'], align='mid', color=['#d65f5f', '#5fba7d'])
-    styled_deploy = styled_deploy.bar(subset=['Efficiency'], align='left', color='#5fba7d', vmin=0, vmax=3)
-    styled_deploy = styled_deploy.bar(subset=['52W Percentile'], align='left', color='#5bc0de', vmin=0, vmax=100)
-    
-    # Clean Number Formats
-    styled_deploy = styled_deploy.format({
-        'Momentum': "{:.2f}%",
-        'Efficiency': "{:.2f}",
-        'PE Ratio': "{:.1f}",
-        'Sector PE': "{:.1f}",
-        'Current Price': "{:.2f}",
-        'Stop-Loss Level': "{:.2f}",
-        '52W Percentile': "{:.1f}%"
-    }, na_rep="N/A")
-
-    st.dataframe(styled_deploy, use_container_width=True, height=600)
+    # Using Streamlit's Native Column Configs for correct bar rendering
+    st.dataframe(
+        styled_deploy,
+        use_container_width=True,
+        height=600,
+        column_config={
+            "Momentum": st.column_config.ProgressColumn(
+                "Momentum",
+                help="Relative Price Momentum",
+                format="%.2f%%",
+                min_value=0,
+                max_value=200
+            ),
+            "Efficiency": st.column_config.ProgressColumn(
+                "Efficiency",
+                help="Risk-Adjusted Smoothing",
+                format="%.2f",
+                min_value=0,
+                max_value=3
+            ),
+            "52W Percentile": st.column_config.ProgressColumn(
+                "52W Percentile",
+                help="Current Price position within yearly range",
+                format="%.1f%%",
+                min_value=0,
+                max_value=100
+            ),
+            "PE Ratio": st.column_config.NumberColumn(format="%.1f"),
+            "Sector PE": st.column_config.NumberColumn(format="%.1f"),
+            "Current Price": st.column_config.NumberColumn(format="%.2f"),
+            "Stop-Loss Level": st.column_config.NumberColumn(format="%.2f")
+        }
+    )
 
 # --- LAYMAN'S FINANCE EXPANDED DICTIONARY ---
 st.divider()
