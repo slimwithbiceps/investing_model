@@ -5,7 +5,11 @@ import numpy as np
 import plotly.express as px
 from datetime import datetime
 import time
-from yahooquery import Ticker 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import json
+import os
 
 # --- 1. SETTINGS & LOAN CONSTANTS ---
 st.set_page_config(page_title="EMI-Shield Global Cockpit", layout="wide")
@@ -15,7 +19,7 @@ TAX_RATE = 0.20
 TAX_ADJUSTED_TARGET = LOAN_APR / (1 - TAX_RATE)  # 9.54% Gross Target
 FORTNIGHTLY_SIP = 20000 
 PER_STOCK_SIP = 10000  
-SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv" 
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSJtykI9lRFLh-z8ZhFIbvALKPJbcrXxqLqg05L6yZ4BsHOdum4m8y_W-jmS4CdNXjTEXPiOM0Bmfl8/pub?gid=0&single=true&output=csv"
 
 # --- MANUAL CACHE OVERRIDE ---
 with st.sidebar:
@@ -82,13 +86,10 @@ SECTOR_MAP = {
 
 # --- 2. DATA ENGINES & SAFETY FILTERS ---
 def get_safe_last(series, fallback=0.0):
-    """A bulletproof extractor that will never crash, even on empty Yahoo data."""
     try:
-        if series is None:
-            return float(fallback)
+        if series is None: return float(fallback)
         clean_series = series.dropna()
-        if len(clean_series) > 0:
-            return float(clean_series.iloc[-1])
+        if len(clean_series) > 0: return float(clean_series.iloc[-1])
         return float(fallback)
     except Exception:
         return float(fallback)
@@ -98,46 +99,68 @@ def fetch_macro_and_markets():
     macro = yf.download(["^NSEI", "^NDX", "^INDIAVIX", "INR=X"], period="1y", interval="1d")['Close']
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
     
-    pe_data = {}
-    chunk_size = 15 
-    
-    for i in range(0, len(UNIVERSE), chunk_size):
-        chunk = UNIVERSE[i:i + chunk_size]
+    # --- THE MEMORY BANK ---
+    CACHE_FILE = "pe_memory_bank.json"
+    pe_memory = {}
+    if os.path.exists(CACHE_FILE):
         try:
-            yq_tickers = Ticker(chunk)
-            summary = yq_tickers.summary_detail
+            with open(CACHE_FILE, "r") as f:
+                pe_memory = json.load(f)
+        except Exception: pass
+
+    # --- THE STEALTH SESSION ---
+    # Disguises the server request as a modern Google Chrome browser to bypass Yahoo's bot defense
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[401, 403, 404, 429, 500, 502, 503, 504])
+    session.mount('http://', HTTPAdapter(max_retries=retry))
+    session.mount('https://', HTTPAdapter(max_retries=retry))
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    
+    pe_data = {}
+    valid_fetches = 0
+    
+    for t in UNIVERSE:
+        pe_val = np.nan
+        try:
+            ticker = yf.Ticker(t, session=session)
+            info = ticker.info
+            val = info.get('trailingPE') or info.get('forwardPE')
             
-            if isinstance(summary, dict):
-                for t in chunk:
-                    pe_val = np.nan
-                    t_data = summary.get(t)
-                    
-                    if isinstance(t_data, dict):
-                        pe_val = t_data.get('trailingPE')
-                        if pe_val is None or pd.isna(pe_val):
-                            pe_val = t_data.get('forwardPE')
-                            
-                    pe_data[t] = float(pe_val) if pe_val is not None else np.nan
+            if val is not None and not pd.isna(val):
+                pe_val = float(val)
+                pe_memory[t] = pe_val  # Store successfully fetched data in the Memory Bank
+                valid_fetches += 1
             else:
-                for t in chunk: pe_data[t] = np.nan
+                pe_val = pe_memory.get(t, np.nan) # Retrieve from Memory Bank if Yahoo returns blank
                 
         except Exception:
-            for t in chunk: pe_data[t] = np.nan
+            pe_val = pe_memory.get(t, np.nan) # Retrieve from Memory Bank if connection completely drops
             
-        time.sleep(1)
+        pe_data[t] = pe_val
+        time.sleep(0.1) # Micro-pause so we don't trip the rate limit alarm
+        
+    # Save the updated Memory Bank to disk
+    if valid_fetches > 0:
+        try:
+            with open(CACHE_FILE, "w") as f:
+                json.dump(pe_memory, f)
+        except: pass
             
     return macro, stocks, pe_data
 
 def analyze_markets(macro, stock_data_raw, pe_map):
     stocks = stock_data_raw.ffill().bfill()
     
-    # Safely extract columns in case Yahoo completely drops a ticker during a glitch
     nifty = macro.get("^NSEI", pd.Series(dtype=float)).dropna()
     ndx = macro.get("^NDX", pd.Series(dtype=float)).dropna()
     vix = macro.get("^INDIAVIX", pd.Series(dtype=float)).dropna()
     usd_inr = macro.get("INR=X", pd.Series(dtype=float)).dropna()
     
-    c_nifty = get_safe_last(nifty, 23000.0) # Hard fallbacks to prevent cascading math errors
+    c_nifty = get_safe_last(nifty, 23000.0) 
     dma_200 = get_safe_last(nifty.rolling(200).mean() if len(nifty) > 200 else nifty, c_nifty)
     c_vix = get_safe_last(vix, 15.0)
     c_usd = get_safe_last(usd_inr, 83.50)
@@ -154,7 +177,6 @@ def analyze_markets(macro, stock_data_raw, pe_map):
     vol = (stocks.pct_change().rolling(126).std() * np.sqrt(252)).rolling(14).mean()
     efficiency = m_6m / vol
     
-    # --- BULLETPROOF RETURN CALCULATIONS ---
     nifty_base = get_safe_last(nifty.shift(126), c_nifty)
     n_ret = (c_nifty / nifty_base) - 1 if nifty_base != 0 else 0.0
     
@@ -232,7 +254,6 @@ def analyze_markets(macro, stock_data_raw, pe_map):
         df = pd.DataFrame(results).sort_values("Efficiency", ascending=False).reset_index(drop=True)
         df.index += 1  
     else:
-        # Fallback if everything fails so the UI doesn't break
         df = pd.DataFrame(columns=["Ticker", "Country", "Sector", "Verdict", "Momentum", "Efficiency", "PE Ratio", "Sector PE", "Current Price", "Stop-Loss Level", "52W Percentile", "Buffer_Backend"])
         
     return df, macro_status
@@ -381,7 +402,7 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
     except Exception as e: 
         st.error("Audit processing failed. Ensure your spreadsheet labels match clean corporate tickers.")
 
-# --- GLOBAL DEPLOYMENT CONTROLLER (NEW STYLED MATRIX) ---
+# --- GLOBAL DEPLOYMENT CONTROLLER ---
 st.divider()
 st.header(f"🎯 Fortnightly Deployment Portal: Fresh ₹{FORTNIGHTLY_SIP:,}")
 if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
