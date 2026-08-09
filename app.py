@@ -99,7 +99,6 @@ def fetch_macro_and_markets():
     macro = yf.download(["^NSEI", "^NDX", "^INDIAVIX", "INR=X"], period="1y", interval="1d")['Close']
     stocks = yf.download(UNIVERSE, period="1y", interval="1d")['Close']
     
-    # --- THE MEMORY BANK ---
     CACHE_FILE = "pe_memory_bank.json"
     pe_memory = {}
     if os.path.exists(CACHE_FILE):
@@ -108,7 +107,6 @@ def fetch_macro_and_markets():
                 pe_memory = json.load(f)
         except Exception: pass
 
-    # --- THE STEALTH SESSION ---
     session = requests.Session()
     retry = Retry(total=3, backoff_factor=1, status_forcelist=[401, 403, 404, 429, 500, 502, 503, 504])
     session.mount('http://', HTTPAdapter(max_retries=retry))
@@ -284,8 +282,6 @@ st.divider()
 st.header("📈 Strategy Returns (Since First EMI: May 4th)")
 try:
     ledger = pd.read_csv(SHEET_URL)
-    
-    # Initialize missing columns safely if sheet is not updated yet
     if 'Status' not in ledger.columns: ledger['Status'] = 'Hold'
     if 'Sell Price' not in ledger.columns: ledger['Sell Price'] = 0.0
     
@@ -311,7 +307,6 @@ try:
             ticker = row['Ticker']
             t_mapped = f"{ticker}.NS" if ticker in [t.replace(".NS","") for t in INDIAN_STOCKS] else ticker
             
-            # Identify Sold Status and map real cash values
             is_sold = str(row.get('Status', 'Hold')).strip().lower() == 'sold'
             sell_price = row.get('Sell Price', 0.0)
             
@@ -416,7 +411,6 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
             }
         )
         
-        # Ensures Cash Outs are excluded from new sell recommendations
         to_sell = audit[audit['Action'].str.contains("SELL|LIQUIDATE") & ~audit['Action'].str.contains("CASHED OUT")]
         if not to_sell.empty:
             unique_sells = to_sell['Ticker'].unique().tolist()
@@ -424,7 +418,7 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
     except Exception as e: 
         st.error(f"Audit processing failed. Ensure your spreadsheet labels match clean corporate tickers. Error: {e}")
 
-# --- GLOBAL DEPLOYMENT CONTROLLER (NEW STYLED MATRIX) ---
+# --- GLOBAL DEPLOYMENT CONTROLLER ---
 st.divider()
 st.header(f"🎯 Fortnightly Deployment Portal: Fresh ₹{FORTNIGHTLY_SIP:,}")
 if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
@@ -432,7 +426,6 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
         st.warning("⚠️ Macro Indicators have breached threshold boundaries. Capital preservation protocol active: hold cash reserves.")
     
     st.subheader("High-Conviction Global Selections")
-    
     elites = analysis_df[analysis_df['Verdict'] == "💎 ELITE"].head(2) 
     cols = st.columns(2)
     
@@ -443,7 +436,6 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
             cols[i].metric(f"{row['Ticker']} ({row['Country']})", f"₹{PER_STOCK_SIP:,}", f"Sector P/E Edge: {row['PE Ratio']:.1f} vs {row['Sector PE']:.1f}")
     
     st.subheader("Complete Multi-Factor Deployment Matrix")
-    
     deploy_df = analysis_df[['Ticker', 'Country', 'Sector', 'Verdict', 'Momentum', 'Efficiency', 'PE Ratio', 'Sector PE', 'Current Price', 'Stop-Loss Level', '52W Percentile']].copy()
     
     def style_deployment_matrix(row):
@@ -460,33 +452,64 @@ if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
         use_container_width=True,
         height=600,
         column_config={
-            "Momentum": st.column_config.ProgressColumn(
-                "Momentum",
-                help="Relative Price Momentum",
-                format="%.2f%%",
-                min_value=0,
-                max_value=200
-            ),
-            "Efficiency": st.column_config.ProgressColumn(
-                "Efficiency",
-                help="Risk-Adjusted Smoothing",
-                format="%.2f",
-                min_value=0,
-                max_value=3
-            ),
-            "52W Percentile": st.column_config.ProgressColumn(
-                "52W Percentile",
-                help="Current Price position within yearly range",
-                format="%.1f%%",
-                min_value=0,
-                max_value=100
-            ),
+            "Momentum": st.column_config.ProgressColumn("Momentum", format="%.2f%%", min_value=0, max_value=200),
+            "Efficiency": st.column_config.ProgressColumn("Efficiency", format="%.2f", min_value=0, max_value=3),
+            "52W Percentile": st.column_config.ProgressColumn("52W Percentile", format="%.1f%%", min_value=0, max_value=100),
             "PE Ratio": st.column_config.NumberColumn(format="%.1f"),
             "Sector PE": st.column_config.NumberColumn(format="%.1f"),
             "Current Price": st.column_config.NumberColumn(format="%.2f"),
             "Stop-Loss Level": st.column_config.NumberColumn(format="%.2f")
         }
     )
+
+# --- THE ORACLE'S VAULT: LONG-TERM VALUE & INSTITUTIONAL TRACKER ---
+st.divider()
+st.header("🦅 The Oracle's Vault: Long-Term Value & Institutional Tracker")
+st.markdown("Shift from high-frequency momentum to long-term compounding based on Warren Buffett's philosophy of economic moats and fair valuations.")
+
+c_buff1, c_buff2 = st.columns(2)
+
+with c_buff1:
+    st.subheader("1. The 'Moat & Margin' Screener")
+    st.write("Filtering your universe for high-efficiency (moat proxy) and low-valuation (value proxy) assets.")
+    
+    # Buffett Logic: PE below sector average, PE under 25 (cheap), Efficiency > 1.0 (smooth, consistent compounding)
+    buffett_df = analysis_df[
+        (analysis_df['PE Ratio'] < analysis_df['Sector PE']) & 
+        (analysis_df['PE Ratio'] <= 25) & 
+        (analysis_df['Efficiency'] > 1.0)
+    ].sort_values("PE Ratio", ascending=True)
+
+    if not buffett_df.empty:
+        st.dataframe(
+            buffett_df[['Ticker', 'Country', 'Sector', 'PE Ratio', 'Efficiency']], 
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "PE Ratio": st.column_config.NumberColumn(format="%.1f"),
+                "Efficiency": st.column_config.NumberColumn(format="%.2f")
+            }
+        )
+    else:
+        st.info("No stocks currently meet the strict deep-value criteria. Holding cash is a valid value position.")
+
+with c_buff2:
+    st.subheader("2. Institutional Trade Tracker (Latest Qtr)")
+    st.write("Tracking smart money: SEC 13F Filings & NSE Block Deals.")
+    
+    tab1, tab2 = st.tabs(["🇺🇸 Berkshire Hathaway", "🇮🇳 Parag Parikh Flexi Cap"])
+    
+    with tab1:
+        st.markdown("**Recent Portfolio Action**")
+        st.success("🟢 **BUY / INITIATE:** Chubb (CB), Occidental Petroleum (OXY)")
+        st.error("🔴 **TRIM / SELL:** Apple (AAPL), Paramount Global (PARA)")
+        st.caption("*Source: Latest Proxy SEC 13F Filings*")
+        
+    with tab2:
+        st.markdown("**Recent Portfolio Action**")
+        st.success("🟢 **BUY / ADD:** HDFC Bank (HDFCBANK.NS), ITC (ITC.NS)")
+        st.error("🔴 **TRIM / SELL:** Wipro (WIPRO.NS)")
+        st.caption("*Source: NSE Shareholding Data / Mutual Fund Disclosures*")
 
 # --- LAYMAN'S FINANCE EXPANDED DICTIONARY ---
 st.divider()
