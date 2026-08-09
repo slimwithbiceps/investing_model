@@ -109,7 +109,6 @@ def fetch_macro_and_markets():
         except Exception: pass
 
     # --- THE STEALTH SESSION ---
-    # Disguises the server request as a modern Google Chrome browser to bypass Yahoo's bot defense
     session = requests.Session()
     retry = Retry(total=3, backoff_factor=1, status_forcelist=[401, 403, 404, 429, 500, 502, 503, 504])
     session.mount('http://', HTTPAdapter(max_retries=retry))
@@ -132,18 +131,17 @@ def fetch_macro_and_markets():
             
             if val is not None and not pd.isna(val):
                 pe_val = float(val)
-                pe_memory[t] = pe_val  # Store successfully fetched data in the Memory Bank
+                pe_memory[t] = pe_val  
                 valid_fetches += 1
             else:
-                pe_val = pe_memory.get(t, np.nan) # Retrieve from Memory Bank if Yahoo returns blank
+                pe_val = pe_memory.get(t, np.nan) 
                 
         except Exception:
-            pe_val = pe_memory.get(t, np.nan) # Retrieve from Memory Bank if connection completely drops
+            pe_val = pe_memory.get(t, np.nan) 
             
         pe_data[t] = pe_val
-        time.sleep(0.1) # Micro-pause so we don't trip the rate limit alarm
+        time.sleep(0.1) 
         
-    # Save the updated Memory Bank to disk
     if valid_fetches > 0:
         try:
             with open(CACHE_FILE, "w") as f:
@@ -224,7 +222,6 @@ def analyze_markets(macro, stock_data_raw, pe_map):
             
         stop_loss = float(row['High_52w'] * 0.85) if pd.notna(row['High_52w']) else 0.0
         
-        # --- MULTI-FACTOR SCORING ENGINE ---
         score = 0
         if row['Momentum'] > row['Benchmark_Ret']: score += 1
         if pd.notna(row['Efficiency']) and row['Efficiency'] > 0.8: score += 1
@@ -287,6 +284,11 @@ st.divider()
 st.header("📈 Strategy Returns (Since First EMI: May 4th)")
 try:
     ledger = pd.read_csv(SHEET_URL)
+    
+    # Initialize missing columns safely if sheet is not updated yet
+    if 'Status' not in ledger.columns: ledger['Status'] = 'Hold'
+    if 'Sell Price' not in ledger.columns: ledger['Sell Price'] = 0.0
+    
     ledger['Date'] = pd.to_datetime(ledger['Date'], dayfirst=False).dt.tz_localize(None)
     
     macro_data.index = macro_data.index.tz_localize(None)
@@ -308,8 +310,16 @@ try:
         for _, row in active.iterrows():
             ticker = row['Ticker']
             t_mapped = f"{ticker}.NS" if ticker in [t.replace(".NS","") for t in INDIAN_STOCKS] else ticker
-            try: val += row['Qty'] * float(stock_data_clean.loc[d, t_mapped])
-            except: val += row['Total_Value']
+            
+            # Identify Sold Status and map real cash values
+            is_sold = str(row.get('Status', 'Hold')).strip().lower() == 'sold'
+            sell_price = row.get('Sell Price', 0.0)
+            
+            if is_sold and pd.notna(sell_price) and float(sell_price) > 0:
+                val += row['Qty'] * float(sell_price)
+            else:
+                try: val += row['Qty'] * float(stock_data_clean.loc[d, t_mapped])
+                except: val += row['Total_Value']
             
         invested = active['Total_Value'].sum()
         port_returns_pct = ((val / invested) - 1) * 100 if invested > 0 else 0
@@ -357,7 +367,7 @@ try:
     st.plotly_chart(fig, use_container_width=True)
     
 except Exception as e:
-    st.info("💡 Waiting for complete ledger data to overlay custom performance plots.")
+    st.info(f"💡 Waiting for complete ledger data to overlay custom performance plots. Details: {e}")
 
 # --- THE AUDIT & STOP-LOSS ENGINE ---
 st.divider()
@@ -365,12 +375,23 @@ st.header("♻️ Strategy Portfolio Audit & Stop-Loss Engine")
 if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
     try:
         ledger = pd.read_csv(SHEET_URL)
+        if 'Status' not in ledger.columns: ledger['Status'] = 'Hold'
+        if 'Sell Price' not in ledger.columns: ledger['Sell Price'] = 0.0
+            
         audit = ledger.merge(analysis_df, on="Ticker", how="left")
         
-        audit['Holding Amount (₹)'] = audit['Qty'] * audit['Current Price']
-        audit['Return (%)'] = ((audit['Current Price'] - audit['BuyPrice']) / audit['BuyPrice']) * 100
+        def get_eff_price(r):
+            is_sold = str(r.get('Status', 'Hold')).strip().lower() == 'sold'
+            if is_sold and pd.notna(r.get('Sell Price')) and float(r.get('Sell Price')) > 0:
+                return float(r['Sell Price'])
+            return r['Current Price']
+            
+        audit['Effective Price'] = audit.apply(get_eff_price, axis=1)
+        audit['Holding Amount (₹)'] = audit['Qty'] * audit['Effective Price']
+        audit['Return (%)'] = ((audit['Effective Price'] - audit['BuyPrice']) / audit['BuyPrice']) * 100
         
         def audit_action(row):
+            if str(row.get('Status', 'Hold')).strip().lower() == 'sold': return "💰 CASHED OUT"
             if pd.isna(row['Buffer_Backend']): return "⚠️ GAP DATA"
             if float(row['Buffer_Backend']) <= 0: return "🚨 STOP-LOSS HIT: LIQUIDATE"
             if row['Verdict'] == "🛑 WEAK": return "🛑 RECYCLE ASSETS (SELL)"
@@ -379,7 +400,7 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
         audit['Action'] = audit.apply(audit_action, axis=1)
         
         display_cols = [
-            'Ticker', 'Country', 'Action', 'Verdict', 'Return (%)', 
+            'Ticker', 'Country', 'Status', 'Action', 'Verdict', 'Return (%)', 
             'Holding Amount (₹)', 'Momentum', 'Efficiency', 'PE Ratio'
         ]
         
@@ -395,14 +416,15 @@ if st.button("🔍 RUN ACTIVE HOLDINGS AUDIT"):
             }
         )
         
-        to_sell = audit[audit['Action'].str.contains("SELL|LIQUIDATE")]
+        # Ensures Cash Outs are excluded from new sell recommendations
+        to_sell = audit[audit['Action'].str.contains("SELL|LIQUIDATE") & ~audit['Action'].str.contains("CASHED OUT")]
         if not to_sell.empty:
             unique_sells = to_sell['Ticker'].unique().tolist()
             st.error(f"Execution Recommended: Sell out of {', '.join(unique_sells)} entries.")
     except Exception as e: 
-        st.error("Audit processing failed. Ensure your spreadsheet labels match clean corporate tickers.")
+        st.error(f"Audit processing failed. Ensure your spreadsheet labels match clean corporate tickers. Error: {e}")
 
-# --- GLOBAL DEPLOYMENT CONTROLLER ---
+# --- GLOBAL DEPLOYMENT CONTROLLER (NEW STYLED MATRIX) ---
 st.divider()
 st.header(f"🎯 Fortnightly Deployment Portal: Fresh ₹{FORTNIGHTLY_SIP:,}")
 if st.button("🚀 INITIATE GLOBAL ALPHA MATRIX SCAN"):
