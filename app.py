@@ -6,10 +6,9 @@ import plotly.express as px
 from datetime import datetime
 import time
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import json
 import os
+import concurrent.futures
 
 # --- 1. SETTINGS & LOAN CONSTANTS ---
 st.set_page_config(page_title="EMI-Shield Global Cockpit", layout="wide")
@@ -108,38 +107,35 @@ def fetch_macro_and_markets():
         except Exception: pass
 
     session = requests.Session()
-    retry = Retry(total=3, backoff_factor=1, status_forcelist=[401, 403, 404, 429, 500, 502, 503, 504])
-    session.mount('http://', HTTPAdapter(max_retries=retry))
-    session.mount('https://', HTTPAdapter(max_retries=retry))
+    # Removed aggressive Retries. If Yahoo blocks, we fail fast to prevent app hanging.
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
     })
     
     pe_data = {}
     valid_fetches = 0
     
-    for t in UNIVERSE:
-        pe_val = np.nan
+    # Fast-Fail Fetcher Function for Multithreading
+    def fetch_pe(t):
         try:
             ticker = yf.Ticker(t, session=session)
             info = ticker.info
-            val = info.get('trailingPE') or info.get('forwardPE')
-            
+            return t, info.get('trailingPE') or info.get('forwardPE')
+        except:
+            return t, None
+
+    # MULTITHREADING: Fetches 15 stocks at the exact same time. Drops loading from minutes to seconds.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        futures = [executor.submit(fetch_pe, t) for t in UNIVERSE]
+        for future in concurrent.futures.as_completed(futures):
+            t, val = future.result()
             if val is not None and not pd.isna(val):
-                pe_val = float(val)
-                pe_memory[t] = pe_val  
+                pe_data[t] = float(val)
+                pe_memory[t] = float(val)  
                 valid_fetches += 1
             else:
-                pe_val = pe_memory.get(t, np.nan) 
+                pe_data[t] = pe_memory.get(t, np.nan) 
                 
-        except Exception:
-            pe_val = pe_memory.get(t, np.nan) 
-            
-        pe_data[t] = pe_val
-        time.sleep(0.1) 
-        
     if valid_fetches > 0:
         try:
             with open(CACHE_FILE, "w") as f:
@@ -473,7 +469,6 @@ with c_buff1:
     st.subheader("1. The 'Moat & Margin' Screener")
     st.write("Filtering your universe for high-efficiency (moat proxy) and low-valuation (value proxy) assets.")
     
-    # Buffett Logic: PE below sector average, PE under 25 (cheap), Efficiency > 1.0 (smooth, consistent compounding)
     buffett_df = analysis_df[
         (analysis_df['PE Ratio'] < analysis_df['Sector PE']) & 
         (analysis_df['PE Ratio'] <= 25) & 
